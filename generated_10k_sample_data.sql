@@ -3,6 +3,10 @@
 -- Purpose: Expand sample data to 10,000 records per table
 -- Database: MySQL
 -- ================================================================
+
+-- increase max recursion depth
+SET SESSION cte_max_recursion_depth = 10001;
+
 -- Generate 10,000 Specialties
 INSERT INTO specialties (specialty_id, specialty_name, specialty_code) WITH RECURSIVE numbers AS (
         SELECT 1 AS n
