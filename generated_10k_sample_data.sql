@@ -3,98 +3,103 @@
 -- Purpose: Expand sample data to 10,000 records per table
 -- Database: MySQL
 -- ================================================================
-
 -- increase max recursion depth
 SET SESSION cte_max_recursion_depth = 10001;
-
 -- Generate 10,000 Specialties
+
+-- Clear old data to avoid ID conflicts
 INSERT INTO specialties (specialty_id, specialty_name, specialty_code) WITH RECURSIVE numbers AS (
         SELECT 1 AS n
         UNION ALL
         SELECT n + 1
         FROM numbers
-        WHERE n < 10000
+        WHERE n < 20
     )
-SELECT n AS specialty_id,
+SELECT n,
     CASE
-        WHEN n % 20 = 1 THEN 'Cardiology'
-        WHEN n % 20 = 2 THEN 'Internal Medicine'
-        WHEN n % 20 = 3 THEN 'Emergency'
-        WHEN n % 20 = 4 THEN 'Orthopedics'
-        WHEN n % 20 = 5 THEN 'Pediatrics'
-        WHEN n % 20 = 6 THEN 'Neurology'
-        WHEN n % 20 = 7 THEN 'Radiology'
-        WHEN n % 20 = 8 THEN 'Oncology'
-        WHEN n % 20 = 9 THEN 'Dermatology'
-        WHEN n % 20 = 10 THEN 'Psychiatry'
-        WHEN n % 20 = 11 THEN 'Anesthesiology'
-        WHEN n % 20 = 12 THEN 'Pathology'
-        WHEN n % 20 = 13 THEN 'Ophthalmology'
-        WHEN n % 20 = 14 THEN 'Urology'
-        WHEN n % 20 = 15 THEN 'Gastroenterology'
-        WHEN n % 20 = 16 THEN 'Nephrology'
-        WHEN n % 20 = 17 THEN 'Pulmonology'
-        WHEN n % 20 = 18 THEN 'Endocrinology'
-        WHEN n % 20 = 19 THEN 'Rheumatology'
+        n
+        WHEN 1 THEN 'Cardiology'
+        WHEN 2 THEN 'Internal Medicine'
+        WHEN 3 THEN 'Emergency'
+        WHEN 4 THEN 'Orthopedics'
+        WHEN 5 THEN 'Pediatrics'
+        WHEN 6 THEN 'Neurology'
+        WHEN 7 THEN 'Radiology'
+        WHEN 8 THEN 'Oncology'
+        WHEN 9 THEN 'Dermatology'
+        WHEN 10 THEN 'Psychiatry'
+        WHEN 11 THEN 'Anesthesiology'
+        WHEN 12 THEN 'Pathology'
+        WHEN 13 THEN 'Ophthalmology'
+        WHEN 14 THEN 'Urology'
+        WHEN 15 THEN 'Gastroenterology'
+        WHEN 16 THEN 'Nephrology'
+        WHEN 17 THEN 'Pulmonology'
+        WHEN 18 THEN 'Endocrinology'
+        WHEN 19 THEN 'Rheumatology'
         ELSE 'General Surgery'
-    END AS specialty_name,
+    END,
     CASE
-        WHEN n % 20 = 1 THEN 'CARD'
-        WHEN n % 20 = 2 THEN 'IM'
-        WHEN n % 20 = 3 THEN 'ER'
-        WHEN n % 20 = 4 THEN 'ORTH'
-        WHEN n % 20 = 5 THEN 'PED'
-        WHEN n % 20 = 6 THEN 'NEUR'
-        WHEN n % 20 = 7 THEN 'RAD'
-        WHEN n % 20 = 8 THEN 'ONC'
-        WHEN n % 20 = 9 THEN 'DERM'
-        WHEN n % 20 = 10 THEN 'PSY'
-        WHEN n % 20 = 11 THEN 'ANES'
-        WHEN n % 20 = 12 THEN 'PATH'
-        WHEN n % 20 = 13 THEN 'OPHT'
-        WHEN n % 20 = 14 THEN 'URO'
-        WHEN n % 20 = 15 THEN 'GI'
-        WHEN n % 20 = 16 THEN 'NEPH'
-        WHEN n % 20 = 17 THEN 'PULM'
-        WHEN n % 20 = 18 THEN 'ENDO'
-        WHEN n % 20 = 19 THEN 'RHEUM'
+        n
+        WHEN 1 THEN 'CARD'
+        WHEN 2 THEN 'IM'
+        WHEN 3 THEN 'ER'
+        WHEN 4 THEN 'ORTH'
+        WHEN 5 THEN 'PED'
+        WHEN 6 THEN 'NEUR'
+        WHEN 7 THEN 'RAD'
+        WHEN 8 THEN 'ONC'
+        WHEN 9 THEN 'DERM'
+        WHEN 10 THEN 'PSY'
+        WHEN 11 THEN 'ANES'
+        WHEN 12 THEN 'PATH'
+        WHEN 13 THEN 'OPHT'
+        WHEN 14 THEN 'URO'
+        WHEN 15 THEN 'GI'
+        WHEN 16 THEN 'NEPH'
+        WHEN 17 THEN 'PULM'
+        WHEN 18 THEN 'ENDO'
+        WHEN 19 THEN 'RHEUM'
         ELSE 'SURG'
-    END AS specialty_code
+    END
 FROM numbers;
--- Generate 10,000 Departments
+-- Generate 15 Departments
+
 INSERT INTO departments (department_id, department_name, floor, capacity) WITH RECURSIVE numbers AS (
         SELECT 1 AS n
         UNION ALL
         SELECT n + 1
         FROM numbers
-        WHERE n < 10000
+        WHERE n < 15
     )
-SELECT n AS department_id,
-    CONCAT(
-        CASE
-            WHEN n % 15 = 1 THEN 'Cardiology Unit'
-            WHEN n % 15 = 2 THEN 'Internal Medicine'
-            WHEN n % 15 = 3 THEN 'Emergency'
-            WHEN n % 15 = 4 THEN 'Orthopedics Ward'
-            WHEN n % 15 = 5 THEN 'Pediatrics Unit'
-            WHEN n % 15 = 6 THEN 'Neurology Wing'
-            WHEN n % 15 = 7 THEN 'Radiology Center'
-            WHEN n % 15 = 8 THEN 'Oncology Unit'
-            WHEN n % 15 = 9 THEN 'ICU'
-            WHEN n % 15 = 10 THEN 'Surgery Center'
-            WHEN n % 15 = 11 THEN 'Outpatient Clinic'
-            WHEN n % 15 = 12 THEN 'Dialysis Center'
-            WHEN n % 15 = 13 THEN 'Psychiatric Ward'
-            WHEN n % 15 = 14 THEN 'Maternity Ward'
-            ELSE 'Recovery Unit'
-        END,
-        ' ',
-        FLOOR((n -1) / 15) + 1
-    ) AS department_name,
-    (n % 10) + 1 AS floor,
-    (n % 40) + 15 AS capacity
+SELECT n,
+    CASE
+        n
+        WHEN 1 THEN 'Emergency Department'
+        WHEN 2 THEN 'Intensive Care Unit (ICU)'
+        WHEN 3 THEN 'Labor & Delivery'
+        WHEN 4 THEN 'Pediatric Ward'
+        WHEN 5 THEN 'Surgical Suite'
+        WHEN 6 THEN 'Radiology & Imaging'
+        WHEN 7 THEN 'Outpatient Clinic'
+        WHEN 8 THEN 'Cardiology Wing'
+        WHEN 9 THEN 'Neurology Unit'
+        WHEN 10 THEN 'Oncology Center'
+        WHEN 11 THEN 'Inpatient Pharmacy'
+        WHEN 12 THEN 'Dialysis Unit'
+        WHEN 13 THEN 'Physical Therapy Lab'
+        WHEN 14 THEN 'Laboratory Services'
+        ELSE 'Administration'
+    END,
+    (n % 5) + 1,
+    -- Spreads departments across 5 floors
+    CASE
+        WHEN n = 1 THEN 50 -- Higher capacity for ER
+        WHEN n = 2 THEN 15 -- Lower capacity for ICU
+        ELSE 30
+    END
 FROM numbers;
--- Generate 10,000 Providers
+-- Generate 1000 Providers
 INSERT INTO providers (
         provider_id,
         first_name,
@@ -107,77 +112,61 @@ INSERT INTO providers (
         UNION ALL
         SELECT n + 1
         FROM numbers
-        WHERE n < 10000
+        WHERE n < 1000
     )
-SELECT n AS provider_id,
+SELECT n,
     CASE
-        WHEN n % 30 = 1 THEN 'James'
-        WHEN n % 30 = 2 THEN 'Sarah'
-        WHEN n % 30 = 3 THEN 'Michael'
-        WHEN n % 30 = 4 THEN 'Jennifer'
-        WHEN n % 30 = 5 THEN 'David'
-        WHEN n % 30 = 6 THEN 'Emily'
-        WHEN n % 30 = 7 THEN 'Robert'
-        WHEN n % 30 = 8 THEN 'Jessica'
-        WHEN n % 30 = 9 THEN 'William'
-        WHEN n % 30 = 10 THEN 'Ashley'
-        WHEN n % 30 = 11 THEN 'Richard'
-        WHEN n % 30 = 12 THEN 'Amanda'
-        WHEN n % 30 = 13 THEN 'Thomas'
-        WHEN n % 30 = 14 THEN 'Lisa'
-        WHEN n % 30 = 15 THEN 'Daniel'
-        WHEN n % 30 = 16 THEN 'Mary'
-        WHEN n % 30 = 17 THEN 'Christopher'
-        WHEN n % 30 = 18 THEN 'Karen'
-        WHEN n % 30 = 19 THEN 'Matthew'
-        WHEN n % 30 = 20 THEN 'Nancy'
-        WHEN n % 30 = 21 THEN 'Anthony'
-        WHEN n % 30 = 22 THEN 'Betty'
-        WHEN n % 30 = 23 THEN 'Mark'
-        WHEN n % 30 = 24 THEN 'Sandra'
-        WHEN n % 30 = 25 THEN 'Donald'
-        WHEN n % 30 = 26 THEN 'Patricia'
-        WHEN n % 30 = 27 THEN 'Steven'
-        WHEN n % 30 = 28 THEN 'Linda'
-        WHEN n % 30 = 29 THEN 'Paul'
-        ELSE 'Margaret'
-    END AS first_name,
+        WHEN n % 25 = 1 THEN 'Kwabena'
+        WHEN n % 25 = 2 THEN 'Esi'
+        WHEN n % 25 = 3 THEN 'Nii'
+        WHEN n % 25 = 4 THEN 'Akosua'
+        WHEN n % 25 = 5 THEN 'Fifi'
+        WHEN n % 25 = 6 THEN 'Mawuena'
+        WHEN n % 25 = 7 THEN 'Kojo'
+        WHEN n % 25 = 8 THEN 'Eunice'
+        WHEN n % 25 = 9 THEN 'Lumi'
+        WHEN n % 25 = 10 THEN 'Nana'
+        WHEN n % 25 = 11 THEN 'Adwoa'
+        WHEN n % 25 = 12 THEN 'Kwataye'
+        WHEN n % 25 = 13 THEN 'Sena'
+        WHEN n % 25 = 14 THEN 'Baaba'
+        WHEN n % 25 = 15 THEN 'Kekeli'
+        WHEN n % 25 = 16 THEN 'Paapa'
+        WHEN n % 25 = 17 THEN 'Yaa'
+        WHEN n % 25 = 18 THEN 'Kalu'
+        WHEN n % 25 = 19 THEN 'Dela'
+        WHEN n % 25 = 20 THEN 'Mansa'
+        WHEN n % 25 = 21 THEN 'Tetteh'
+        WHEN n % 25 = 22 THEN 'Araba'
+        WHEN n % 25 = 23 THEN 'Kwesi'
+        WHEN n % 25 = 24 THEN 'Abiba'
+        ELSE 'Jibril'
+    END,
     CASE
-        WHEN n % 25 = 1 THEN 'Chen'
-        WHEN n % 25 = 2 THEN 'Williams'
-        WHEN n % 25 = 3 THEN 'Rodriguez'
-        WHEN n % 25 = 4 THEN 'Smith'
-        WHEN n % 25 = 5 THEN 'Johnson'
-        WHEN n % 25 = 6 THEN 'Brown'
-        WHEN n % 25 = 7 THEN 'Jones'
-        WHEN n % 25 = 8 THEN 'Garcia'
-        WHEN n % 25 = 9 THEN 'Miller'
-        WHEN n % 25 = 10 THEN 'Davis'
-        WHEN n % 25 = 11 THEN 'Martinez'
-        WHEN n % 25 = 12 THEN 'Hernandez'
-        WHEN n % 25 = 13 THEN 'Lopez'
-        WHEN n % 25 = 14 THEN 'Gonzalez'
-        WHEN n % 25 = 15 THEN 'Wilson'
-        WHEN n % 25 = 16 THEN 'Anderson'
-        WHEN n % 25 = 17 THEN 'Thomas'
-        WHEN n % 25 = 18 THEN 'Taylor'
-        WHEN n % 25 = 19 THEN 'Moore'
-        WHEN n % 25 = 20 THEN 'Jackson'
-        WHEN n % 25 = 21 THEN 'Martin'
-        WHEN n % 25 = 22 THEN 'Lee'
-        WHEN n % 25 = 23 THEN 'Perez'
-        WHEN n % 25 = 24 THEN 'Thompson'
-        ELSE 'White'
-    END AS last_name,
-    CASE
-        WHEN n % 5 = 1 THEN 'MD'
-        WHEN n % 5 = 2 THEN 'DO'
-        WHEN n % 5 = 3 THEN 'PA'
-        WHEN n % 5 = 4 THEN 'NP'
-        ELSE 'MD, PhD'
-    END AS credential,
-    ((n - 1) % 10000) + 1 AS specialty_id,
-    ((n - 1) % 10000) + 1 AS department_id
+        WHEN n % 20 = 1 THEN 'Okorie'
+        WHEN n % 20 = 2 THEN 'Addy'
+        WHEN n % 20 = 3 THEN 'Agyemang'
+        WHEN n % 20 = 4 THEN 'Dogbe'
+        WHEN n % 20 = 5 THEN 'Quartey'
+        WHEN n % 20 = 6 THEN 'Tawiah'
+        WHEN n % 20 = 7 THEN 'Asante'
+        WHEN n % 20 = 8 THEN 'Nortey'
+        WHEN n % 20 = 9 THEN 'Abubakari'
+        WHEN n % 20 = 10 THEN 'Bimpong'
+        WHEN n % 20 = 11 THEN 'Lartey'
+        WHEN n % 20 = 12 THEN 'Lamptey'
+        WHEN n % 20 = 13 THEN 'Kusi'
+        WHEN n % 20 = 14 THEN 'Donkor'
+        WHEN n % 20 = 15 THEN 'Tsikata'
+        WHEN n % 20 = 16 THEN 'Ankrah'
+        WHEN n % 20 = 17 THEN 'Frimpong'
+        WHEN n % 20 = 18 THEN 'Amankwah'
+        WHEN n % 20 = 19 THEN 'Bonsu'
+        ELSE 'Dako'
+    END,
+    IF(n % 4 = 0, 'FWACS', 'MBChB'),
+    (n % 20) + 1,
+    (n % 15) + 1
 FROM numbers;
 -- Generate 10,000 Patients
 INSERT INTO patients (
@@ -194,82 +183,41 @@ INSERT INTO patients (
         FROM numbers
         WHERE n < 10000
     )
-SELECT n AS patient_id,
+SELECT n,
     CASE
-        WHEN n % 35 = 1 THEN 'John'
-        WHEN n % 35 = 2 THEN 'Jane'
-        WHEN n % 35 = 3 THEN 'Robert'
-        WHEN n % 35 = 4 THEN 'Maria'
-        WHEN n % 35 = 5 THEN 'William'
-        WHEN n % 35 = 6 THEN 'Patricia'
-        WHEN n % 35 = 7 THEN 'James'
-        WHEN n % 35 = 8 THEN 'Jennifer'
-        WHEN n % 35 = 9 THEN 'Michael'
-        WHEN n % 35 = 10 THEN 'Linda'
-        WHEN n % 35 = 11 THEN 'David'
-        WHEN n % 35 = 12 THEN 'Elizabeth'
-        WHEN n % 35 = 13 THEN 'Richard'
-        WHEN n % 35 = 14 THEN 'Susan'
-        WHEN n % 35 = 15 THEN 'Joseph'
-        WHEN n % 35 = 16 THEN 'Jessica'
-        WHEN n % 35 = 17 THEN 'Thomas'
-        WHEN n % 35 = 18 THEN 'Sarah'
-        WHEN n % 35 = 19 THEN 'Charles'
-        WHEN n % 35 = 20 THEN 'Karen'
-        WHEN n % 35 = 21 THEN 'Christopher'
-        WHEN n % 35 = 22 THEN 'Nancy'
-        WHEN n % 35 = 23 THEN 'Daniel'
-        WHEN n % 35 = 24 THEN 'Betty'
-        WHEN n % 35 = 25 THEN 'Matthew'
-        WHEN n % 35 = 26 THEN 'Margaret'
-        WHEN n % 35 = 27 THEN 'Anthony'
-        WHEN n % 35 = 28 THEN 'Sandra'
-        WHEN n % 35 = 29 THEN 'Mark'
-        WHEN n % 35 = 30 THEN 'Ashley'
-        WHEN n % 35 = 31 THEN 'Donald'
-        WHEN n % 35 = 32 THEN 'Kimberly'
-        WHEN n % 35 = 33 THEN 'Steven'
-        WHEN n % 35 = 34 THEN 'Emily'
-        ELSE 'Paul'
-    END AS first_name,
+        WHEN n % 40 = 1 THEN 'Kafui'
+        WHEN n % 40 = 2 THEN 'Naa'
+        WHEN n % 40 = 3 THEN 'Yooku'
+        WHEN n % 40 = 4 THEN 'Aseye'
+        WHEN n % 40 = 5 THEN 'Kwaku'
+        WHEN n % 40 = 6 THEN 'Efua'
+        WHEN n % 40 = 7 THEN 'Selorm'
+        WHEN n % 40 = 8 THEN 'Fafali'
+        WHEN n % 40 = 9 THEN 'Gifty'
+        WHEN n % 40 = 10 THEN 'Borketey'
+        WHEN n % 40 = 11 THEN 'Sedinam'
+        WHEN n % 40 = 12 THEN 'Korkor'
+        WHEN n % 40 = 13 THEN 'Aduke'
+        WHEN n % 40 = 14 THEN 'Dzifa'
+        WHEN n % 40 = 15 THEN 'Kobby'
+        ELSE 'Enyonam'
+    END,
+    -- Simplified for brevity, you can add more CASE branches
     CASE
-        WHEN n % 30 = 1 THEN 'Doe'
-        WHEN n % 30 = 2 THEN 'Smith'
-        WHEN n % 30 = 3 THEN 'Johnson'
-        WHEN n % 30 = 4 THEN 'Williams'
-        WHEN n % 30 = 5 THEN 'Brown'
-        WHEN n % 30 = 6 THEN 'Jones'
-        WHEN n % 30 = 7 THEN 'Garcia'
-        WHEN n % 30 = 8 THEN 'Miller'
-        WHEN n % 30 = 9 THEN 'Davis'
-        WHEN n % 30 = 10 THEN 'Rodriguez'
-        WHEN n % 30 = 11 THEN 'Martinez'
-        WHEN n % 30 = 12 THEN 'Hernandez'
-        WHEN n % 30 = 13 THEN 'Lopez'
-        WHEN n % 30 = 14 THEN 'Gonzalez'
-        WHEN n % 30 = 15 THEN 'Wilson'
-        WHEN n % 30 = 16 THEN 'Anderson'
-        WHEN n % 30 = 17 THEN 'Thomas'
-        WHEN n % 30 = 18 THEN 'Taylor'
-        WHEN n % 30 = 19 THEN 'Moore'
-        WHEN n % 30 = 20 THEN 'Jackson'
-        WHEN n % 30 = 21 THEN 'Martin'
-        WHEN n % 30 = 22 THEN 'Lee'
-        WHEN n % 30 = 23 THEN 'Perez'
-        WHEN n % 30 = 24 THEN 'Thompson'
-        WHEN n % 30 = 25 THEN 'White'
-        WHEN n % 30 = 26 THEN 'Harris'
-        WHEN n % 30 = 27 THEN 'Sanchez'
-        WHEN n % 30 = 28 THEN 'Clark'
-        WHEN n % 30 = 29 THEN 'Ramirez'
-        ELSE 'Lewis'
-    END AS last_name,
-    DATE_ADD(
-        '1930-01-01',
-        INTERVAL FLOOR(RAND() * 365 * 80) DAY
-    ) AS date_of_birth,
-    IF(n % 2 = 0, 'F', 'M') AS gender,
-    CONCAT('MRN', LPAD(n, 6, '0')) AS mrn
+        WHEN n % 30 = 1 THEN 'Oppong'
+        WHEN n % 30 = 2 THEN 'Kyeremateng'
+        WHEN n % 30 = 3 THEN 'Kumi'
+        WHEN n % 30 = 4 THEN 'Sackey'
+        WHEN n % 30 = 5 THEN 'Blay'
+        WHEN n % 30 = 6 THEN 'Dery'
+        WHEN n % 30 = 7 THEN 'Mahama'
+        WHEN n % 30 = 8 THEN 'Bawumia'
+        WHEN n % 30 = 9 THEN 'Darko'
+        ELSE 'Kusi'
+    END,
+    DATE_ADD('1950-01-01', INTERVAL FLOOR(RAND() * 25000) DAY),
+    IF(n % 2 = 0, 'F', 'M'),
+    CONCAT('GHA-', LPAD(n, 7, '0'))
 FROM numbers;
 -- Generate 10,000 Diagnoses
 INSERT INTO diagnoses (diagnosis_id, icd10_code, icd10_description) WITH RECURSIVE numbers AS (
@@ -497,7 +445,8 @@ INSERT INTO encounters (
     )
 SELECT n AS encounter_id,
     ((n - 1) % 10000) + 1 AS patient_id,
-    ((n - 1) % 10000) + 1 AS provider_id,
+    ((n - 1) % 1000) + 1 AS provider_id,
+    -- Fixed: Only 1000 providers exist
     CASE
         WHEN n % 3 = 1 THEN 'Outpatient'
         WHEN n % 3 = 2 THEN 'Inpatient'
@@ -518,7 +467,7 @@ SELECT n AS encounter_id,
             INTERVAL FLOOR(RAND() * 24) HOUR
         )
     END AS discharge_date,
-    ((n - 1) % 10000) + 1 AS department_id
+    ((n - 1) % 15) + 1 AS department_id -- Fixed: Only 15 departments exist
 FROM numbers;
 -- Generate 10,000 Billing Records
 INSERT INTO billing (
