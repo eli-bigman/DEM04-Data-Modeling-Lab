@@ -3,10 +3,21 @@
 ## Overview
 You've joined HealthTech Analytics as a junior data engineer. The clinical team built a normalized transactional database (3NF), but analytics queries are slow. Your job: analyze the OLTP schema, identify performance issues, then design and build an optimized star schema.
 
+## Database Schema (ERD)
+
+![OLTP Database Schema](erd_diagram.png)
+
+The normalized schema consists of 10 tables with the following relationships:
+- **Central table**: `encounters` links patients, providers, departments, and billing
+- **Dimension tables**: `patients`, `providers`, `specialties`, `departments`
+- **Junction tables**: `encounter_diagnoses`, `encounter_procedures` (many-to-many)
+- **Lookup tables**: `diagnoses` (ICD-10 codes), `procedures` (CPT codes)
+- **Transaction table**: `billing` (financial data per encounter)
+
 ## Project Structure
 
 ### Part 1: Normalized OLTP Schema
-Study the production system's 8 normalized tables (patients, specialties, departments, providers, encounters, diagnoses, procedures, billing) and understand how data is organized.
+Study the production system's 10 normalized tables (patients, specialties, departments, providers, encounters, diagnoses, procedures, encounter_diagnoses, encounter_procedures, billing) and understand how data is organized.
 
 ### Part 2: Find the Performance Problem
 Write SQL queries to answer 4 business questions using the normalized schema:
