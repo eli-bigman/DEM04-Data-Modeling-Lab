@@ -49,13 +49,13 @@ The following dimension tables will be created:
 1. DIM_DATE
    Purpose: Calendar dimension for time-based analysis
    Attributes:
-   - date_key (PK, surrogate key)
-   - calendar_date (actual date)
+   - date_key (PK, surrogate key) -- PRIMARY KEY (clustered index for joins)
+   - calendar_date (actual date) -- INDEX (unique date lookups)
    - year (YYYY)
    - quarter (Q1-Q4)
    - month (1-12)
    - month_name (January-December)
-   - year_month (YYYY-MM) -- pre-computed for grouping
+   - year_month (YYYY-MM) -- INDEX (frequent GROUP BY in all queries)
    - day_of_week (1-7)
    - day_name (Monday-Sunday)
    - is_weekend (boolean)
@@ -66,9 +66,9 @@ The following dimension tables will be created:
 2. DIM_PATIENT
    Purpose: Patient demographics and attributes
    Attributes:
-   - patient_key (PK, surrogate key)
-   - patient_id (natural key from source)
-   - mrn (medical record number)
+   - patient_key (PK, surrogate key) -- PRIMARY KEY (clustered index for joins)
+   - patient_id (natural key from source) -- INDEX (lookup from source system)
+   - mrn (medical record number) -- INDEX (unique identifier for patient lookup)
    - first_name
    - last_name
    - full_name (concatenated)
@@ -77,32 +77,32 @@ The following dimension tables will be created:
    - gender
    - effective_date (SCD Type 2 if tracking changes)
    - expiration_date (SCD Type 2)
-   - is_current (boolean, SCD Type 2)
+   - is_current (boolean, SCD Type 2) -- INDEX (filter for current records only)
    
    Why: Pre-computed age groups enable demographic analysis without CASE statements
 
 3. DIM_PROVIDER
    Purpose: Provider information including specialty
    Attributes:
-   - provider_key (PK, surrogate key)
-   - provider_id (natural key from source)
+   - provider_key (PK, surrogate key) -- PRIMARY KEY (clustered index for joins)
+   - provider_id (natural key from source) -- INDEX (lookup from source system)
    - first_name
    - last_name
    - full_name (concatenated)
    - credential (MD, DO, NP, PA)
-   - specialty_id (denormalized from specialties table)
+   - specialty_id (denormalized from specialties table) -- INDEX (filtering by specialty)
    - department_id (denormalized from departments table)
    - effective_date (SCD Type 2)
    - expiration_date (SCD Type 2)
-   - is_current (boolean, SCD Type 2)
+   - is_current (boolean, SCD Type 2) -- INDEX (filter for current records only)
    
    Why: Denormalizing specialty into provider dimension eliminates JOIN chain
 
 4. DIM_SPECIALTY
    Purpose: Medical specialty lookup
    Attributes:
-   - specialty_key (PK, surrogate key)
-   - specialty_id (natural key from source)
+   - specialty_key (PK, surrogate key) -- PRIMARY KEY (clustered index for joins)
+   - specialty_id (natural key from source) -- INDEX (lookup from source system)
    - specialty_name (Cardiology, Internal Medicine, etc.)
    - specialty_code (CARD, IM, ER)
    - specialty_category (Medical, Surgical, Diagnostic)
@@ -112,8 +112,8 @@ The following dimension tables will be created:
 5. DIM_DEPARTMENT
    Purpose: Hospital department/unit information
    Attributes:
-   - department_key (PK, surrogate key)
-   - department_id (natural key from source)
+   - department_key (PK, surrogate key) -- PRIMARY KEY (clustered index for joins)
+   - department_id (natural key from source) -- INDEX (lookup from source system)
    - department_name
    - floor (physical location)
    - capacity (bed count)
@@ -124,8 +124,8 @@ The following dimension tables will be created:
 6. DIM_ENCOUNTER_TYPE
    Purpose: Type of patient encounter
    Attributes:
-   - encounter_type_key (PK, surrogate key)
-   - encounter_type (Outpatient, Inpatient, ER)
+   - encounter_type_key (PK, surrogate key) -- PRIMARY KEY (clustered index for joins)
+   - encounter_type (Outpatient, Inpatient, ER) -- INDEX (frequent filtering and GROUP BY)
    - encounter_type_category (Ambulatory, Acute, Emergency)
    - expected_los_days (average expected length of stay)
    
@@ -208,17 +208,19 @@ BRIDGE TABLES TO CREATE:
 
 1. BRIDGE_ENCOUNTER_DIAGNOSES
    Attributes:
-   - encounter_key (FK to fact_encounters)
-   - diagnosis_key (FK to dim_diagnosis)
+   - encounter_key (FK to fact_encounters) -- INDEX (join to fact table)
+   - diagnosis_key (FK to dim_diagnosis) -- INDEX (join to diagnosis dimension)
    - diagnosis_sequence (1=primary, 2=secondary, etc.)
    - diagnosis_date (if different from encounter date)
+   - COMPOSITE INDEX (encounter_key, diagnosis_key) -- optimizes bi-directional joins
    
 2. BRIDGE_ENCOUNTER_PROCEDURES
    Attributes:
-   - encounter_key (FK to fact_encounters)
-   - procedure_key (FK to dim_procedure)
+   - encounter_key (FK to fact_encounters) -- INDEX (join to fact table)
+   - procedure_key (FK to dim_procedure) -- INDEX (join to procedure dimension)
    - procedure_date
    - procedure_sequence (order performed)
+   - COMPOSITE INDEX (encounter_key, procedure_key) -- optimizes bi-directional joins
 
 WHY USE BRIDGE TABLES?
 
