@@ -1,80 +1,60 @@
 # Healthcare Analytics Lab: OLTP to Star Schema
 
-## Overview
-You've joined HealthTech Analytics as a junior data engineer. The clinical team built a normalized transactional database (3NF), but analytics queries are slow. Your job: analyze the OLTP schema, identify performance issues, then design and build an optimized star schema.
+## 🏥 Overview
+This project simulates a real-world Data Engineering task at "HealthTech Analytics". The clinical team originally built a normalized transactional database (3NF) which struggled with slow analytical queries. 
 
-## Database Schema (ERD)
-
-![OLTP Database Schema](diagrams/erd_diagram.png)
-
-The normalized schema consists of 10 tables with the following relationships:
-- **Central table**: `encounters` links patients, providers, departments, and billing
-- **Dimension tables**: `patients`, `providers`, `specialties`, `departments`
-- **Junction tables**: `encounter_diagnoses`, `encounter_procedures` (many-to-many)
-- **Lookup tables**: `diagnoses` (ICD-10 codes), `procedures` (CPT codes)
-- **Transaction table**: `billing` (financial data per encounter)
-
-## Project Structure
-
-### Part 1: Normalized OLTP Schema
-Study the production system's 10 normalized tables (patients, specialties, departments, providers, encounters, diagnoses, procedures, encounter_diagnoses, encounter_procedures, billing) and understand how data is organized.
-
-### Part 2: Find the Performance Problem
-Write SQL queries to answer 4 business questions using the normalized schema:
-1. **Monthly Encounters by Specialty** - Total encounters and unique patients by encounter type
-2. **Top Diagnosis-Procedure Pairs** - Most common diagnosis-procedure combinations
-3. **30-Day Readmission Rate** - Which specialty has the highest readmission rate
-4. **Revenue by Specialty & Month** - Total allowed amounts by specialty and month
-
-Run queries, measure performance, and identify bottlenecks.
-
-### Part 3: Design the Star Schema
-Design an optimized dimensional model including:
-- Dimension tables (date, patient, provider, specialty, department, encounter type)
-- Fact table with pre-aggregated metrics
-- Bridge tables for many-to-many relationships
-- Rewrite all 4 queries for the star schema
-- Document ETL logic
-
-### Part 4: Analysis & Reflection
-Compare normalized vs. denormalized performance, analyze trade-offs, and quantify improvements.
-
-## Deliverables
-- ☐ `query_analysis.txt` - 4 queries with performance analysis
-- ☐ `design_decisions.txt` - Design choices documented
-- ☐ `star_schema.sql` - Complete DDL for star schema
-- ☐ `star_schema_queries.txt` - 4 optimized queries with performance comparison
-- ☐ `etl_design.txt` - ETL pseudocode/narrative
-- ☐ `reflection.md` - 1-2 page analysis
-
-## Quick Start
-
-### 1. Create the OLTP Schema
-Run the DDL statements from `Instruction.txt.txt` to create all tables.
-
-### 2. Load Sample Data
-Execute the data generation script:
-```sql
-SOURCE generated_10k_sample_data.sql;
-```
-
-### 3. Verify Data
-```sql
-SELECT 'Patients' AS table_name, COUNT(*) AS record_count FROM patients
-UNION ALL SELECT 'Encounters', COUNT(*) FROM encounters
-UNION ALL SELECT 'Providers', COUNT(*) FROM providers
-UNION ALL SELECT 'Departments', COUNT(*) FROM departments;
-```
-
-## Sample Data
-- **20 medical specialties** across 15 hospital departments
-- **1,000 providers** with Ghanaian names
-- **10,000 patients** with Ghanaian names
-- **10,000 encounters** (Outpatient, Inpatient, ER)
-- **50+ ICD-10 diagnosis codes** and 40+ CPT procedure codes
-- **Date range**: January 1 - December 31, 2024
+**My Role:** As the Data Engineer, I analyzed the performance bottlenecks, designed a Kimball-style Star Schema, implemented the ETL logic, and verified significant performance improvements (up to 3x faster) for key business metrics.
 
 ---
 
-**Database**: MySQL
-**Focus**: Real-world data engineering - performance analysis & dimensional modeling
+## 📂 Repository Contents
+
+### 1. Interactive Analysis 📓
+*   **`notebooks/healthcare_analytics_exploration.ipynb`**: This is the core of the project. It contains:
+    *   Setup code to initialize the OLTP database.
+    *   **Performance Analysis (OLTP)**: Execution of business queries against the normalized schema with `EXPLAIN ANALYZE` metrics.
+    *   **Star Schema Implementation**: DDL execution and ETL data loading.
+    *   **Performance Comparison (OLAP)**: Side-by-side benchmarking showing the speed improvements of the new design.
+
+### 2. Deliverables & Documentation 📄
+All required project artifacts are located in the `deliverables/` folder:
+*   **`star_schema.sql`**: The complete definition of the optimized database (Dimensions, Facts, Bridges) and the ETL scripts to populate them.
+*   **`star_schema_queries.txt`**: The optimized SQL queries for the 4 business questions.
+*   **`design_decisions.txt`**: Detailed justification for grain choices, dimension handling, and bridge tables.
+*   **`etl_design.txt`**: The strategy document for loading data, handling SCDs, and pre-aggregating metrics.
+*   **`reflection.md`**: a final report analyzing "Why" the Star Schema is faster and the trade-offs involved.
+
+### 3. Data Scripts 💾
+*   `data/generated_10k_sample_data.sql`: The source script used to seed the initial OLTP database environment.
+
+---
+
+## 🚀 Key Improvements Achieved
+
+| Business Metric | OLTP Strategy | Star Schema Strategy | Improvement |
+| :--- | :--- | :--- | :--- |
+| **30-Day Readmissions** | Complex Self-Join + Date Math | Pre-computed `is_readmission` flag | **~2.9x Faster** |
+| **Revenue by Specialty** | 4-Table Join Chain | Denormalized Fact Table | **~1.7x Faster** |
+| **Monthly Encounters** | Runtime `DATE_FORMAT()` | Pre-computed Date Dimension | **~6% Faster** |
+
+---
+
+## 🛠️ How to Run
+
+1.  **Prerequisites**: Ensure you have Python and a MySQL compatible environment (local or Docker) running.
+2.  **Explore the Notebook**: Open `notebooks/healthcare_analytics_exploration.ipynb` in VS Code.
+3.  **Execute sequentially**:
+    *   Run the "Part 1" cells to build the OLTP environment.
+    *   Run "Part 2" to see the slow query performance.
+    *   Run "Part 3" to build the Star Schema and populate it.
+    *   Run "Part 4" to witness the performance gains.
+
+---
+
+## ✅ Project Checklist
+- [x] Analyze OLTP Performance bottlenecks
+- [x] Design Star Schema (Fact, Dimensions, Bridges)
+- [x] Implement DDL & ETL Scripts
+- [x] Optimize Business Queries
+- [x] Document Design Decisions & ETL Strategy
+- [x] Final Reflection & Performance Report
