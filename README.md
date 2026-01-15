@@ -5,7 +5,7 @@ You've joined HealthTech Analytics as a junior data engineer. The clinical team 
 
 ## Database Schema (ERD)
 
-![OLTP Database Schema](erd_diagram.png)
+![OLTP Database Schema](diagrams/erd_diagram.png)
 
 The normalized schema consists of 10 tables with the following relationships:
 - **Central table**: `encounters` links patients, providers, departments, and billing
