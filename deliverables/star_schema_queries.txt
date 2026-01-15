@@ -1,0 +1,95 @@
+-- =====================================================
+-- STAR SCHEMA OPTIMIZED QUERIES
+-- =====================================================
+
+-- -----------------------------------------------------
+-- Question 1: Monthly Encounters by Specialty
+-- Goal: Count encounters and unique patients per specialty/month
+-- Optimization Key: Pre-joined dimensions, Removed DATE_FORMAT()
+-- -----------------------------------------------------
+SELECT 
+    dd.year_month AS encounter_month,
+    ds.specialty_name,
+    det.encounter_type,
+    COUNT(fe.encounter_key) AS total_encounters,
+    COUNT(DISTINCT fe.patient_key) AS unique_patients
+FROM fact_encounters fe
+INNER JOIN dim_date dd ON fe.date_key = dd.date_key
+INNER JOIN dim_specialty ds ON fe.specialty_key = ds.specialty_key
+INNER JOIN dim_encounter_type det ON fe.encounter_type_key = det.encounter_type_key
+GROUP BY 
+    dd.year_month,
+    ds.specialty_name,
+    det.encounter_type
+ORDER BY 
+    encounter_month,
+    ds.specialty_name,
+    det.encounter_type;
+
+
+-- -----------------------------------------------------
+-- Question 2: Top Diagnosis-Procedure Pairs
+-- Goal: Most common combinations of diagnosis & procedure
+-- Optimization Key: Bridge tables handle M:M relationship efficiently
+-- -----------------------------------------------------
+SELECT 
+    dd.icd10_code,
+    dd.icd10_description,
+    dp.cpt_code,
+    dp.cpt_description,
+    COUNT(DISTINCT fe.encounter_key) AS encounter_count
+FROM fact_encounters fe
+INNER JOIN bridge_encounter_diagnoses bd ON fe.encounter_key = bd.encounter_key
+INNER JOIN dim_diagnosis dd ON bd.diagnosis_key = dd.diagnosis_key
+INNER JOIN bridge_encounter_procedures bp ON fe.encounter_key = bp.encounter_key
+INNER JOIN dim_procedure dp ON bp.procedure_key = dp.procedure_key
+GROUP BY 
+    dd.icd10_code,
+    dd.icd10_description,
+    dp.cpt_code,
+    dp.cpt_description
+ORDER BY 
+    encounter_count DESC
+LIMIT 10;
+
+
+-- -----------------------------------------------------
+-- Question 3: 30-Day Readmission Rate
+-- Goal: Identify specialties with highest readmission rates
+-- Optimization Key: Pre-computed 'is_readmission' flag in ETL
+-- -----------------------------------------------------
+SELECT 
+    ds.specialty_name,
+    COUNT(fe.encounter_key) AS total_discharges,
+    SUM(CASE WHEN fe.is_readmission = 1 THEN 1 ELSE 0 END) AS readmissions_within_30days,
+    ROUND(SUM(CASE WHEN fe.is_readmission = 1 THEN 1 ELSE 0 END) * 100.0 / 
+          COUNT(fe.encounter_key), 2) AS readmission_rate_percent
+FROM fact_encounters fe
+INNER JOIN dim_specialty ds ON fe.specialty_key = ds.specialty_key
+INNER JOIN dim_encounter_type det ON fe.encounter_type_key = det.encounter_type_key
+WHERE det.encounter_type = 'Inpatient'
+GROUP BY ds.specialty_name
+ORDER BY readmission_rate_percent DESC;
+
+
+-- -----------------------------------------------------
+-- Question 4: Revenue by Specialty & Month
+-- Goal: Calculate allowed amounts by month
+-- Optimization Key: Billing data denormalized into Fact Table
+-- -----------------------------------------------------
+SELECT 
+    dd.year_month AS revenue_month,
+    ds.specialty_name,
+    COUNT(fe.encounter_key) AS total_encounters,
+    SUM(fe.total_allowed_amount) AS total_revenue,
+    ROUND(AVG(fe.total_allowed_amount), 2) AS avg_revenue_per_encounter
+FROM fact_encounters fe
+INNER JOIN dim_date dd ON fe.date_key = dd.date_key
+INNER JOIN dim_specialty ds ON fe.specialty_key = ds.specialty_key
+WHERE fe.has_billing = TRUE
+GROUP BY 
+    dd.year_month,
+    ds.specialty_name
+ORDER BY 
+    revenue_month,
+    total_revenue DESC;
