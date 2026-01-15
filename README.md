@@ -22,7 +22,7 @@ All required project artifacts are located in the `deliverables/` folder:
 *   **`star_schema_queries.txt`**: The optimized SQL queries for the 4 business questions.
 *   **`design_decisions.txt`**: Detailed justification for grain choices, dimension handling, and bridge tables.
 *   **`etl_design.txt`**: The strategy document for loading data, handling SCDs, and pre-aggregating metrics.
-*   **`reflection.md`**: a final report analyzing "Why" the Star Schema is faster and the trade-offs involved.
+*   **`reflection.md`**: A final report analyzing "Why" the Star Schema is faster and the trade-offs involved.
 
 ### 3. Data Scripts 💾
 *   `data/generated_10k_sample_data.sql`: The source script used to seed the initial OLTP database environment.
@@ -41,7 +41,7 @@ All required project artifacts are located in the `deliverables/` folder:
 
 ## 🛠️ How to Run
 
-1.  **Prerequisites**: Ensure you have Python and a MySQL compatible environment (local or Docker) running.
+1.  **Prerequisites**: Ensure you have Python and a MySQL compatible environment (local or Docker) running, plus the required Python packages (for example: `jupyter`/`notebook`, `pandas`, and a MySQL connector such as `mysql-connector-python` or `pymysql`). If a `requirements.txt` file is provided, install dependencies with `pip install -r requirements.txt`.
 2.  **Explore the Notebook**: Open `notebooks/healthcare_analytics_exploration.ipynb` in VS Code.
 3.  **Execute sequentially**:
     *   Run the "Part 1" cells to build the OLTP environment.
