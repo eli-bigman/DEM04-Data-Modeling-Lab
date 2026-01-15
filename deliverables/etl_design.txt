@@ -1,0 +1,137 @@
+HEALTHCARE ANALYTICS LAB - ETL DESIGN
+ETL Strategy & Logic Documentation
+============================================
+
+1. OVERVIEW
+-----------------------------
+The ETL process transforms data from the normalized OLTP schema (3NF) into
+the optimized Star Schema (Dimensional Model). 
+
+Strategy: Full Refresh (Truncate and Load)
+- For this lab environment, we drop and recreate tables to ensure consistency.
+- In a production environment, this would be converted to an Incremental Load.
+
+Order of Operations:
+1. Clean Target (DIM -> FACT -> BRIDGE dependency order)
+2. Load Dimensions (Date, Specialty, Department, EncounterType)
+3. Load Heavy Dimensions (Patient, Provider)
+4. Load Fact Table (Encounters)
+5. Update Fact Table (Readmission Flags)
+6. Load Bridge Tables (Diagnoses, Procedures)
+
+============================================
+
+2. DIMENSION LOAD LOGIC
+-----------------------------
+
+DIM_DATE (One-Time Generation)
+- Logic: Use Recursive CTE to generate date sequence for 2024.
+- Attributes: 
+  * `calendar_date`: Sequence date
+  * `year`, `month`, `day`: Extracted functions
+  * `quarter_name`: CONCAT('Q', QUARTER(dt))
+  * `is_weekend`: CASE WHEN DAYOFWEEK IN (1,7) THEN TRUE
+
+DIM_PATIENT (SCD Type 1/2)
+- Logic: Select from OLTP `patients` table.
+- Transformation:
+  * `full_name`: CONCAT(first_name, ' ', last_name)
+  * `age`: TIMESTAMPDIFF(YEAR, dob, CURDATE())
+  * `age_group`: CASE statement (0-17, 18-34, 35-54, 55-74, 75+)
+- SCD Handling:
+  * Initial load sets `is_current = TRUE`, `effective_date = CURRENT_DATE`
+  * Future updates would insert new row and close out previous row (SCD Type 2)
+
+DIM_PROVIDER (Denormalized)
+- Logic: JOIN `providers` -> `specialties` -> `departments`
+- Denormalization: Access specialty_name and department_name directly.
+- Benefit: Eliminates need for snowflake joins in analytic queries.
+
+DIM_SPECIALTY / DIM_DEPARTMENT / DIM_DIAGNOSIS
+- Logic: Direct SELECT from corresponding OLTP tables.
+- Transformations: 
+  * `specialty_category`: mapped from codes (SURG->Surgical)
+  * `department_type`: mapped from name (ICU->Inpatient)
+
+============================================
+
+3. FACT TABLE LOAD LOGIC
+-----------------------------
+
+Target: FACT_ENCOUNTERS
+Source: OLTP `encounters` table
+
+Dimension Lookups (Surrogate Keys):
+- Join `encounters` to dimensions on Natural Keys (patient_id, provider_id, etc.)
+- Filter dimensions by `is_current = TRUE` to get active surrogate key.
+- Example: 
+  `JOIN dim_patient dp ON e.patient_id = dp.patient_id AND dp.is_current = TRUE`
+
+Pre-Aggregated Metrics:
+1. `diagnosis_count`: 
+   - LEFT JOIN subquery grouping `encounter_diagnoses` by encounter_id.
+   - Use COALESCE(count, 0) to handle zeros.
+2. `procedure_count`:
+   - Same logic as diagnosis_count.
+3. `length_of_stay_days`: 
+   - DATEDIFF(discharge_date, encounter_date)
+4. `total_allowed_amount` & `has_billing`:
+   - LEFT JOIN `billing` table.
+   - Sum allowed_amount.
+   - Set `has_billing` flag if billing_id IS NOT NULL.
+
+Readmission Logic (Complex Update):
+- Initial Insert: Set `is_readmission = FALSE`
+- Post-Load Update:
+  - Self-join `fact_encounters` (f1, f2)
+  - Match on `patient_key`
+  - Condition: f2.date > f1.discharge AND days_between <= 30
+  - Condition: Both are Inpatient
+  - Update f2.is_readmission = TRUE
+
+============================================
+
+4. BRIDGE TABLE LOAD LOGIC
+-----------------------------
+
+BRIDGE_ENCOUNTER_DIAGNOSES
+- Source: OLTP `encounter_diagnoses`
+- Logic:
+  1. Join `encounter_diagnoses` to `fact_encounters` (to get `encounter_key`)
+  2. Join to `dim_diagnosis` (to get `diagnosis_key`)
+  3. Select `diagnosis_sequence` directly.
+- Purpose: Resolves Many-to-Many relationship.
+
+BRIDGE_ENCOUNTER_PROCEDURES
+- Source: OLTP `encounter_procedures`
+- Logic: Same as diagnosis bridge.
+- Transformation: Calculate `procedure_sequence` using ROW_NUMBER() over date.
+
+============================================
+
+5. REFRESH STRATEGY
+-----------------------------
+
+Production Schedule: Daily Nightly Batch (02:00 AM)
+
+Incremental Load Logic:
+1. Identify new/changed source records (using `last_updated` timestamp if avail).
+2. **Dimension Logic**:
+   - Check if natural key exists.
+   - If attributes changed (e.g., patient moved), Insert New Row (SCD Type 2).
+   - Update old row `expiration_date` = yesterday.
+   - If new key, simple Insert.
+3. **Fact Logic**:
+   - Load encounters where `encounter_date` >= Last_Load_Date.
+   - Re-run Readmission Update logic for rolling 30-day window.
+
+Late Arriving Facts:
+- Issue: Encounter arrives before Patient record exists.
+- Strategy: Insert "Unknown Patient" dummy record in dimension.
+- Assign fact to "Unknown Patient" key.
+- Update fact key when true patient record arrives.
+
+Data Quality Checks:
+- Alert if `fact_encounters` count != Source count.
+- Alert if `total_revenue` checksum differs > 1%.
+- Alert if `unmapped_keys` count > 0.
