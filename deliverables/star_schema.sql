@@ -24,12 +24,12 @@ DROP TABLE IF EXISTS dim_procedure;
 CREATE TABLE dim_date (
     date_key INT AUTO_INCREMENT PRIMARY KEY,
     calendar_date DATE NOT NULL UNIQUE,
-    year INT NOT NULL,
-    quarter INT NOT NULL,
+    `year` INT NOT NULL,
+    `quarter` INT NOT NULL,
     quarter_name VARCHAR(2),
-    month INT NOT NULL,
+    `month` INT NOT NULL,
     month_name VARCHAR(20),
-    year_month VARCHAR(7) NOT NULL,
+    `year_month` VARCHAR(7) NOT NULL,
     week_of_year INT,
     day_of_month INT,
     day_of_week INT,
@@ -37,7 +37,7 @@ CREATE TABLE dim_date (
     is_weekend BOOLEAN DEFAULT FALSE,
     is_holiday BOOLEAN DEFAULT FALSE,
     INDEX idx_calendar_date (calendar_date),
-    INDEX idx_year_month (year_month)
+    INDEX idx_year_month (`year_month`)
 );
 
 -- =====================================================
@@ -116,56 +116,56 @@ CREATE TABLE dim_provider (
 
 -- =====================================================
 -- DIMENSION: dim_encounter_type
+-- =====================================================
 
-CREATE TABLE dim_diagnosis (
-    -- Surrogate Key
-    diagnosis_key INT AUTO_INCREMENT PRIMARY KEY,
-    
-    -- Natural Key
-    diagnosis_id INT NOT NULL UNIQUE,
-    
-    -- Diagnosis Information
+CREATE TABLE dim_encounter_type (
     encounter_type_key INT AUTO_INCREMENT PRIMARY KEY,
     encounter_type VARCHAR(50) NOT NULL UNIQUE,
+    encounter_type_category VARCHAR(50),
+    expected_los_days INT,
+    INDEX idx_encounter_type (encounter_type)
+);
+
+-- =====================================================
+-- DIMENSION: dim_diagnosis
 -- =====================================================
 
-CREATE TABLE dim_encounter_type (NCREMENT PRIMARY KEY,
-    
-    -- Natural Key
-    procedure_id INT NOT NULL UNIQUE,
-    
--- =====================================================
-
-CREATE TABLE dim_diagnosis (INDEX idx_diagnosis_id (diagnosis_id),
+CREATE TABLE dim_diagnosis (
+    diagnosis_key INT AUTO_INCREMENT PRIMARY KEY,
+    diagnosis_id INT NOT NULL UNIQUE,
+    icd10_code VARCHAR(10) NOT NULL,
+    icd10_description VARCHAR(200),
+    icd10_category VARCHAR(100),
+    INDEX idx_diagnosis_id (diagnosis_id),
     INDEX idx_icd10_code (icd10_code)
 );
 
 -- =====================================================
 -- DIMENSION: dim_procedure
-    specialty_key INT NOT NULL,
-    department_key INT NOT NULL,
+-- =====================================================
+
+CREATE TABLE dim_procedure (
     procedure_key INT AUTO_INCREMENT PRIMARY KEY,
     procedure_id INT NOT NULL UNIQUE,
     cpt_code VARCHAR(10) NOT NULL,
     cpt_description VARCHAR(200),
     procedure_category VARCHAR(100),
     INDEX idx_procedure_id (procedure_id),
--- =====================================================
+    INDEX idx_cpt_code (cpt_code)
+);
 
-CREATE TABLE dim_procedure (
-
 -- =====================================================
--- FACT TABLE: fact_encounters (Grain: One row per encounter) indicator
-    has_billing BOOLEAN DEFAULT FALSE,       -- Billing record exists
-    
-    -- ETL Metadata
-    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    -- Foreign Key Constraints
+-- FACT TABLE: fact_encounters
 -- =====================================================
 
 CREATE TABLE fact_encounters (
+    encounter_key INT AUTO_INCREMENT PRIMARY KEY,
+    date_key INT NOT NULL,
+    patient_key INT NOT NULL,
+    provider_key INT NOT NULL,
+    specialty_key INT NOT NULL,
+    department_key INT NOT NULL,
+    encounter_type_key INT NOT NULL,
     encounter_id INT NOT NULL UNIQUE,
     patient_id INT,
     provider_id INT,
@@ -199,17 +199,7 @@ CREATE TABLE fact_encounters (
 );
 
 -- =====================================================
--- BRIDGE: bridge_encounter_
-    -- Foreign Key Constraints
-    CONSTRAINT fk_bridge_proc_encounter FOREIGN KEY (encounter_key) 
-        REFERENCES fact_encounters(encounter_key),
-    CONSTRAINT fk_bridge_proc_procedure FOREIGN KEY (procedure_key) 
-        REFERENCES dim_procedure(procedure_key),
-    
-    -- Indexes for Bi-directional Joins
-    INDEX idx_encounter_key (encounter_key),
-    INDEX idx_procedure_key (procedure_key)
-    diagnoses
+-- BRIDGE: bridge_encounter_diagnoses
 -- =====================================================
 
 CREATE TABLE bridge_encounter_diagnoses (
@@ -229,13 +219,23 @@ CREATE TABLE bridge_encounter_diagnoses (
 -- =====================================================
 
 CREATE TABLE bridge_encounter_procedures (
-    
+    encounter_key INT NOT NULL,
+    procedure_key INT NOT NULL,
+    procedure_sequence INT,
+    procedure_date DATE,
+    PRIMARY KEY (encounter_key, procedure_key),
+    CONSTRAINT fk_bridge_proc_encounter FOREIGN KEY (encounter_key) REFERENCES fact_encounters(encounter_key),
+    CONSTRAINT fk_bridge_proc_procedure FOREIGN KEY (procedure_key) REFERENCES dim_procedure(procedure_key),
+    INDEX idx_encounter_key (encounter_key),
+    INDEX idx_procedure_key (procedure_key)
+);
+
 -- =====================================================
 -- ETL: POPULATE DIMENSIONS
 -- =====================================================
 
 -- Load dim_date (2024 calendar year)
-INSERT INTO dim_date (calendar_date, year, quarter, quarter_name, month, month_name, year_month, week_of_year, day_of_month, day_of_week, day_name, is_weekend)
+INSERT INTO dim_date (calendar_date, `year`, `quarter`, quarter_name, `month`, month_name, `year_month`, week_of_year, day_of_month, day_of_week, day_name, is_weekend)
 WITH RECURSIVE date_range AS (
     SELECT DATE('2024-01-01') AS dt
     UNION ALL
@@ -245,12 +245,12 @@ WITH RECURSIVE date_range AS (
 )
 SELECT 
     dt AS calendar_date,
-    YEAR(dt) AS year,
-    QUARTER(dt) AS quarter,
+    YEAR(dt) AS `year`,
+    QUARTER(dt) AS `quarter`,
     CONCAT('Q', QUARTER(dt)) AS quarter_name,
-    MONTH(dt) AS month,
+    MONTH(dt) AS `month`,
     DATE_FORMAT(dt, '%M') AS month_name,
-    DATE_FORMAT(dt, '%Y-%m') AS year_month,
+    DATE_FORMAT(dt, '%Y-%m') AS `year_month`,
     WEEK(dt, 1) AS week_of_year,
     DAY(dt) AS day_of_month,
     DAYOFWEEK(dt) AS day_of_week,
@@ -406,15 +406,23 @@ LEFT JOIN (
 ) proc_cnt ON e.encounter_id = proc_cnt.encounter_id;
 
 -- Compute is_readmission flag (30-day readmission)
-UPDATE fact_encounters f1
-INNER JOIN fact_encounters f2 
-    ON f1.patient_id = f2.patient_id
-    AND f1.encounter_datetime > f2.discharge_datetime
-    AND DATEDIFF(f1.encounter_datetime, f2.discharge_datetime) <= 30
-INNER JOIN dim_encounter_type det1 ON f1.encounter_type_key = det1.encounter_type_key
-INNER JOIN dim_encounter_type det2 ON f2.encounter_type_key = det2.encounter_type_key
-SET f1.is_readmission = TRUE
-WHERE det1.encounter_type = 'Inpatient' AND det2.encounter_type = 'Inpatient';
+SET SQL_SAFE_UPDATES = 0;
+
+UPDATE fact_encounters fe
+INNER JOIN (
+    SELECT DISTINCT f1.encounter_key
+    FROM fact_encounters f1
+    INNER JOIN fact_encounters f2 
+        ON f1.patient_id = f2.patient_id
+        AND f1.encounter_datetime > f2.discharge_datetime
+        AND DATEDIFF(f1.encounter_datetime, f2.discharge_datetime) <= 30
+    INNER JOIN dim_encounter_type det1 ON f1.encounter_type_key = det1.encounter_type_key
+    INNER JOIN dim_encounter_type det2 ON f2.encounter_type_key = det2.encounter_type_key
+    WHERE det1.encounter_type = 'Inpatient' AND det2.encounter_type = 'Inpatient'
+) readmissions ON fe.encounter_key = readmissions.encounter_key
+SET fe.is_readmission = TRUE;
+
+SET SQL_SAFE_UPDATES = 1;
 
 -- =====================================================
 -- ETL: POPULATE BRIDGE TABLES
