@@ -1,10 +1,15 @@
 -- =====================================================
--- HEALTHCARE ANALYTICS LAB - STAR SCHEMA DDL
+-- HEALTHCARE ANALYTICS LAB - STAR SCHEMA DDL & ETL
 -- Optimized Dimensional Model for Analytics
--- =====================================================
 -- Grain: One row per encounter | 8 Dimensions + 1 Fact + 2 Bridges
+
 -- =====================================================
 
+-- =====================================================
+-- SECTION 0: ETL METADATA & DATA QUALITY INFRASTRUCTURE
+-- =====================================================
+
+-- Drop existing tables in dependency order
 DROP TABLE IF EXISTS bridge_encounter_procedures;
 DROP TABLE IF EXISTS bridge_encounter_diagnoses;
 DROP TABLE IF EXISTS fact_encounters;
@@ -16,6 +21,137 @@ DROP TABLE IF EXISTS dim_patient;
 DROP TABLE IF EXISTS dim_date;
 DROP TABLE IF EXISTS dim_diagnosis;
 DROP TABLE IF EXISTS dim_procedure;
+DROP TABLE IF EXISTS etl_metadata;
+DROP TABLE IF EXISTS etl_log;
+
+-- ETL Metadata Table: Track incremental load watermarks
+CREATE TABLE etl_metadata (
+    metadata_id INT AUTO_INCREMENT PRIMARY KEY,
+    table_name VARCHAR(100) NOT NULL,
+    last_etl_timestamp TIMESTAMP NOT NULL,
+    last_etl_status ENUM('SUCCESS', 'FAILED', 'RUNNING') DEFAULT 'SUCCESS',
+    rows_processed INT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE INDEX idx_table_name (table_name)
+);
+
+-- ETL Log Table: Detailed execution logging
+CREATE TABLE etl_log (
+    log_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    etl_step VARCHAR(100) NOT NULL,
+    start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    end_time TIMESTAMP NULL,
+    rows_affected INT DEFAULT 0,
+    status ENUM('RUNNING', 'SUCCESS', 'FAILED') DEFAULT 'RUNNING',
+    error_message TEXT NULL,
+    INDEX idx_etl_step (etl_step),
+    INDEX idx_start_time (start_time),
+    INDEX idx_status (status)
+);
+
+-- Data Quality Validation Stored Procedure
+DELIMITER //
+CREATE PROCEDURE validate_source_data()
+BEGIN
+    DECLARE error_count INT DEFAULT 0;
+    DECLARE error_msg TEXT;
+    
+    -- Validation 1: No encounters with discharge before admission
+    SELECT COUNT(*) INTO error_count
+    FROM encounters
+    WHERE discharge_date IS NOT NULL 
+      AND discharge_date < encounter_date;
+    
+    IF error_count > 0 THEN
+        SET error_msg = CONCAT('DATA QUALITY FAIL: ', error_count, 
+            ' encounters have discharge_date < encounter_date');
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = error_msg;
+    END IF;
+    
+    -- Validation 2: No negative billing amounts
+    SELECT COUNT(*) INTO error_count
+    FROM billing
+    WHERE allowed_amount < 0 OR claim_amount < 0;
+    
+    IF error_count > 0 THEN
+        SET error_msg = CONCAT('DATA QUALITY FAIL: ', error_count, 
+            ' billing records have negative amounts');
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = error_msg;
+    END IF;
+    
+    -- Validation 3: All encounters have valid patient references
+    SELECT COUNT(*) INTO error_count
+    FROM encounters e
+    LEFT JOIN patients p ON e.patient_id = p.patient_id
+    WHERE p.patient_id IS NULL;
+    
+    IF error_count > 0 THEN
+        SET error_msg = CONCAT('DATA QUALITY FAIL: ', error_count, 
+            ' encounters have invalid patient_id (orphaned records)');
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = error_msg;
+    END IF;
+    
+    -- Validation 4: All encounters have valid provider references
+    SELECT COUNT(*) INTO error_count
+    FROM encounters e
+    LEFT JOIN providers p ON e.provider_id = p.provider_id
+    WHERE p.provider_id IS NULL;
+    
+    IF error_count > 0 THEN
+        SET error_msg = CONCAT('DATA QUALITY FAIL: ', error_count, 
+            ' encounters have invalid provider_id');
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = error_msg;
+    END IF;
+    
+    -- All validations passed
+    SELECT 'SUCCESS: All pre-ETL data quality checks passed' AS validation_status;
+END//
+DELIMITER ;
+
+-- Data Reconciliation Stored Procedure (Post-ETL)
+DELIMITER //
+CREATE PROCEDURE reconcile_etl_data()
+BEGIN
+    DECLARE oltp_encounter_count INT;
+    DECLARE star_encounter_count INT;
+    DECLARE oltp_revenue DECIMAL(15,2);
+    DECLARE star_revenue DECIMAL(15,2);
+    DECLARE revenue_diff DECIMAL(15,2);
+    
+    -- Row count reconciliation
+    SELECT COUNT(*) INTO oltp_encounter_count FROM encounters;
+    SELECT COUNT(*) INTO star_encounter_count FROM fact_encounters;
+    
+    IF oltp_encounter_count != star_encounter_count THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'RECONCILIATION FAIL: Row count mismatch between OLTP and Star';
+    END IF;
+    
+    -- Revenue reconciliation
+    SELECT COALESCE(SUM(allowed_amount), 0) INTO oltp_revenue FROM billing;
+    SELECT COALESCE(SUM(total_allowed_amount), 0) INTO star_revenue FROM fact_encounters;
+    SET revenue_diff = ABS(oltp_revenue - star_revenue);
+    
+    IF revenue_diff > 0.01 THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'RECONCILIATION FAIL: Revenue mismatch exceeds tolerance';
+    END IF;
+    
+    -- Success message
+    SELECT 
+        'SUCCESS: ETL Reconciliation Passed' AS status,
+        oltp_encounter_count AS oltp_encounters,
+        star_encounter_count AS star_encounters,
+        oltp_revenue AS oltp_total_revenue,
+        star_revenue AS star_total_revenue,
+        revenue_diff AS revenue_difference;
+END//
+DELIMITER ;
+
+-- =====================================================
+-- SECTION 1: DIMENSION TABLES (DDL)
+-- =====================================================
 
 -- =====================================================
 -- DIMENSION: dim_date
@@ -231,8 +367,24 @@ CREATE TABLE bridge_encounter_procedures (
 );
 
 -- =====================================================
--- ETL: POPULATE DIMENSIONS
+-- SECTION 2: ETL EXECUTION WITH TRANSACTION MANAGEMENT
 -- =====================================================
+
+-- Log ETL start
+INSERT INTO etl_log (etl_step, status) 
+VALUES ('star_schema_full_load', 'RUNNING');
+
+SET @etl_start_time = NOW();
+SET @log_id = LAST_INSERT_ID();
+
+-- Step 1: Pre-ETL Data Quality Validation
+CALL validate_source_data();
+
+-- Step 2: Begin Transaction for Dimension Loads
+START TRANSACTION;
+
+-- Log dimension load start
+INSERT INTO etl_log (etl_step, status) VALUES ('load_dimensions', 'RUNNING');
 
 -- Load dim_date (2024 calendar year)
 INSERT INTO dim_date (calendar_date, `year`, `quarter`, quarter_name, `month`, month_name, `year_month`, week_of_year, day_of_month, day_of_week, day_name, is_weekend)
@@ -357,9 +509,25 @@ SELECT
     END AS procedure_category
 FROM procedures;
 
+-- Commit dimension loads
+COMMIT;
+
+-- Update ETL log
+UPDATE etl_log 
+SET end_time = NOW(), 
+    status = 'SUCCESS',
+    rows_affected = (SELECT COUNT(*) FROM dim_date) + (SELECT COUNT(*) FROM dim_patient)
+WHERE etl_step = 'load_dimensions' 
+  AND end_time IS NULL;
+
 -- =====================================================
--- ETL: POPULATE FACT TABLE
+-- SECTION 3: FACT TABLE LOAD WITH TRANSACTION
 -- =====================================================
+
+START TRANSACTION;
+
+-- Log fact load start
+INSERT INTO etl_log (etl_step, status) VALUES ('load_fact_encounters', 'RUNNING');
 
 INSERT INTO fact_encounters (
     date_key, patient_key, provider_key, specialty_key, department_key, encounter_type_key,
@@ -424,16 +592,77 @@ SET fe.is_readmission = TRUE;
 
 SET SQL_SAFE_UPDATES = 1;
 
+-- Commit fact table load
+COMMIT;
+
+-- Update ETL log
+UPDATE etl_log 
+SET end_time = NOW(), 
+    status = 'SUCCESS',
+    rows_affected = (SELECT COUNT(*) FROM fact_encounters)
+WHERE etl_step = 'load_fact_encounters' 
+  AND end_time IS NULL;
+
 -- =====================================================
--- ETL: POPULATE BRIDGE TABLES
+-- SECTION 4: BRIDGE TABLE LOAD WITH TRANSACTION
 -- =====================================================
+
+START TRANSACTION;
+
+-- Log bridge load start
+INSERT INTO etl_log (etl_step, status) VALUES ('load_bridge_tables', 'RUNNING');
 
 -- Load bridge_encounter_diagnoses
 INSERT INTO bridge_encounter_diagnoses (encounter_key, diagnosis_key, diagnosis_sequence, diagnosis_date)
 SELECT 
     f.encounter_key,
     dd.diagnosis_key,
-    ed.diagnosis_sequence,
+
+-- Commit bridge table loads
+COMMIT;
+
+-- Update ETL log
+UPDATE etl_log 
+SET end_time = NOW(), 
+    status = 'SUCCESS',
+    rows_affected = (SELECT COUNT(*) FROM bridge_encounter_diagnoses) + 
+                   (SELECT COUNT(*) FROM bridge_encounter_procedures)
+WHERE etl_step = 'load_bridge_tables' 
+  AND end_time IS NULL;
+
+-- =====================================================
+-- SECTION 5: POST-ETL DATA RECONCILIATION
+-- =====================================================
+
+-- Run reconciliation checks
+CALL reconcile_etl_data();
+
+-- Update ETL metadata
+INSERT INTO etl_metadata (table_name, last_etl_timestamp, last_etl_status, rows_processed)
+VALUES 
+    ('fact_encounters', NOW(), 'SUCCESS', (SELECT COUNT(*) FROM fact_encounters)),
+    ('dim_patient', NOW(), 'SUCCESS', (SELECT COUNT(*) FROM dim_patient)),
+    ('dim_provider', NOW(), 'SUCCESS', (SELECT COUNT(*) FROM dim_provider))
+ON DUPLICATE KEY UPDATE
+    last_etl_timestamp = NOW(),
+    last_etl_status = 'SUCCESS',
+    rows_processed = VALUES(rows_processed);
+
+-- Complete main ETL log entry
+UPDATE etl_log 
+SET end_time = NOW(), 
+    status = 'SUCCESS'
+WHERE log_id = @log_id;
+
+-- Display ETL summary
+SELECT 
+    'ETL COMPLETED SUCCESSFULLY' AS status,
+    (SELECT COUNT(*) FROM fact_encounters) AS total_encounters,
+    (SELECT COUNT(*) FROM dim_patient WHERE is_current = TRUE) AS active_patients,
+    (SELECT COUNT(*) FROM dim_provider WHERE is_current = TRUE) AS active_providers,
+    (SELECT SUM(total_allowed_amount) FROM fact_encounters) AS total_revenue,
+    (SELECT COUNT(*) FROM fact_encounters WHERE is_readmission = TRUE) AS total_readmissions,
+    TIMEDIFF(NOW(), @etl_start_time) AS execution_time;    ed.diagnosis_sequence,
     DATE(f.encounter_datetime) AS diagnosis_date
 FROM encounter_diagnoses ed
 INNER JOIN fact_encounters f ON ed.encounter_id = f.encounter_id
