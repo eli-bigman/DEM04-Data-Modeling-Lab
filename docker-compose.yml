@@ -1,13 +1,12 @@
 # docker-compose.yml
-version: '3.8'
 
 services:
   mysql:
     image: mysql:8.0
     container_name: healthcare-mysql
     environment:
-      MYSQL_ROOT_PASSWORD: password
-      MYSQL_DATABASE: healthcare_analytics_lab
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-healthcare_analytics_lab}
     ports:
       - "3306:3306"
     volumes:
@@ -15,7 +14,7 @@ services:
       - ./data/generated_10k_sample_data.sql:/docker-entrypoint-initdb.d/01-oltp.sql
       - ./deliverables/star_schema.sql:/docker-entrypoint-initdb.d/02-star.sql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-ppassword"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-password}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -33,9 +32,9 @@ services:
     environment:
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
-      - MYSQL_USER=root
-      - MYSQL_PASSWORD=password
-      - MYSQL_DATABASE=healthcare_analytics_lab
+      - MYSQL_USER=${MYSQL_USER:-root}
+      - MYSQL_PASSWORD=${MYSQL_ROOT_PASSWORD:-password}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-healthcare_analytics_lab}
 
 volumes:
   mysql_data:
