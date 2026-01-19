@@ -135,3 +135,110 @@ Data Quality Checks:
 - Alert if `fact_encounters` count != Source count.
 - Alert if `total_revenue` checksum differs > 1%.
 - Alert if `unmapped_keys` count > 0.
+============================================
+
+5. INCREMENTAL ETL STRATEGY 
+-----------------------------
+
+CURRENT STATE: Full Refresh
+- ETL truncates and reloads all data each run
+- Acceptable for 10K encounters (~5 seconds)
+- NOT scalable for production (500K+ daily encounters)
+
+PRODUCTION TARGET: Incremental Loading with CDC
+
+APPROACH A: Timestamp-Based Incremental Load
+-----------------------------
+Prerequisites:
+- Add `last_modified TIMESTAMP` column to OLTP tables:
+  ALTER TABLE encounters ADD COLUMN last_modified TIMESTAMP 
+      DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
+  
+- Create `etl_metadata` table (already implemented in star_schema.sql)
+
+Incremental Logic:
+1. Query watermark from last successful run:
+   SELECT MAX(last_etl_timestamp) FROM etl_metadata WHERE table_name = 'fact_encounters';
+
+2. Load only changed records:
+   INSERT INTO fact_encounters (...)
+   SELECT ...
+   FROM encounters e
+   WHERE e.last_modified > @last_watermark
+      OR e.encounter_id NOT IN (SELECT encounter_id FROM fact_encounters);
+
+3. Update metadata:
+   UPDATE etl_metadata 
+   SET last_etl_timestamp = NOW() 
+   WHERE table_name = 'fact_encounters';
+
+Benefits:
+- Only process new/changed records (10-100x faster)
+- Reduces downtime window from hours to minutes
+- Supports near-real-time analytics (15-min micro-batches)
+
+APPROACH B: Change Data Capture (CDC) - Enterprise
+-----------------------------
+Tools: Debezium, AWS DMS, GoldenGate
+
+Strategy:
+1. Enable MySQL binlog replication
+2. Stream changes to Kafka topic
+3. Consumer processes inserts/updates/deletes incrementally
+4. Near real-time (< 1 minute latency)
+
+Trade-offs:
+✅ Real-time data availability
+✅ No batch window needed
+❌ More complex infrastructure
+❌ Higher operational cost
+
+READMISSION FLAG OPTIMIZATION
+-----------------------------
+Current: Self-join UPDATE after fact load (expensive at scale)
+
+Improved: Compute during INSERT using window functions
+
+WITH ranked_encounters AS (
+    SELECT 
+        e.*,
+        LAG(e.discharge_date) OVER (
+            PARTITION BY e.patient_id 
+            ORDER BY e.encounter_date
+        ) AS prev_discharge,
+        DATEDIFF(e.encounter_date, 
+            LAG(e.discharge_date) OVER (...)
+        ) AS days_since_discharge
+    FROM encounters e
+)
+INSERT INTO fact_encounters (is_readmission, ...)
+SELECT 
+    CASE 
+        WHEN days_since_discharge <= 30 AND encounter_type = 'Inpatient'
+        THEN TRUE 
+        ELSE FALSE 
+    END,
+    ...
+FROM ranked_encounters;
+
+Benefits:
+- Single pass (5x faster than self-join)
+- Transactionally safe
+- Works with incremental loads
+
+IMPLEMENTATION ROADMAP
+-----------------------------
+Week 1: Add last_modified columns to OLTP (requires schema migration)
+Week 2: Test timestamp-based incremental load with 100K records
+Week 3: Refactor readmission logic to use window functions
+Week 4: Load test with 1M+ encounters, tune performance
+Week 5: Production deployment with monitoring
+
+EXPECTED PERFORMANCE AT SCALE
+-----------------------------
+| Encounters | Full Refresh | Incremental (1% daily change) |
+|------------|--------------|-------------------------------|
+| 100K       | 50 sec       | 5 sec                         |
+| 1M         | 8 min        | 30 sec                        |
+| 10M        | 90 min       | 2 min                         |
+| 100M       | 15 hours     | 10 min                        |
