@@ -101,44 +101,168 @@ The optimized analytical database using dimensional modeling:
 ## 🚀 Getting Started
 
 ### Prerequisites
-- **Python 3.8+** with Jupyter Notebook support
-- **MySQL 8.0+** (or compatible database like MariaDB)
-- **Python Packages**: 
-  ```bash
-  pip install jupyter pandas mysql-connector-python
-  ```
-  Or if you have a `requirements.txt`:
-  ```bash
-  pip install -r requirements.txt
-  ```
+- **Docker Desktop** (recommended) or local MySQL installation
+- **Python 3.11+** with Jupyter Notebook support
+- **Git** for version control
 
-### Step-by-Step Setup
+### Quick Start with Docker (Recommended)
 
-#### 1. Set Up the Database
-Start a MySQL server (local installation or Docker):
+#### 1. Clone and Configure Environment
 ```bash
-# Docker option
-docker run --name mysql-healthcare -e MYSQL_ROOT_PASSWORD=password -p 3306:3306 -d mysql:8.0
+# Clone the repository
+git clone <your-repo-url>
+cd "Healthcare Analytics Lab OLTP to Star Schema"
+
+# Create .env file from template
+cp .env.example .env
+
+# Edit .env and set secure passwords
+# NEVER commit .env to git (it's in .gitignore)
 ```
 
-#### 2. Load Sample Data
-Connect to MySQL and create the OLTP database:
+#### 2. Configure Environment Variables
+Edit `.env` file:
 ```bash
-mysql -u root -p < data/generated_10k_sample_data.sql
+# .env
+MYSQL_ROOT_PASSWORD=your_secure_password_here
+MYSQL_DATABASE=healthcare_analytics_lab
+MYSQL_USER=root
 ```
 
-#### 3. Run the Interactive Notebook
-Open the Jupyter notebook in VS Code or Jupyter Lab:
+**🔒 Security Best Practices:**
+- Use strong passwords (min 16 characters, mixed case, numbers, symbols)
+- Never commit `.env` to version control
+- In production: use AWS Secrets Manager, Azure Key Vault, or HashiCorp Vault
+- Rotate credentials every 90 days
+
+#### 3. Start Services
 ```bash
-jupyter notebook notebooks/healthcare_analytics_exploration.ipynb
+# Start MySQL + Jupyter containers
+docker-compose up -d
+
+# Check logs
+docker-compose logs -f
+
+# Verify services are running
+docker ps
 ```
 
-#### 4. Execute the Analysis
-Follow the notebook sections in order:
-- **Part 1**: Initialize OLTP database and inspect schema
-- **Part 2**: Run business queries on OLTP and capture performance metrics
-- **Part 3**: Create star schema and execute ETL
-- **Part 4**: Run optimized queries and compare performance
+#### 4. Access the Environment
+- **Jupyter Notebook**: http://localhost:8888
+- **MySQL Database**: `localhost:3306`
+  - Username: from `MYSQL_USER` in .env
+  - Password: from `MYSQL_ROOT_PASSWORD` in .env
+  - Database: `healthcare_analytics_lab`
+
+#### 5. Verify Data Load
+```bash
+# Connect to MySQL
+docker exec -it healthcare-mysql mysql -uroot -p${MYSQL_ROOT_PASSWORD} healthcare_analytics_lab
+
+# Check tables
+SHOW TABLES;
+
+# Verify data
+SELECT COUNT(*) FROM fact_encounters;
+SELECT COUNT(*) FROM dim_patient;
+
+# View ETL execution log
+SELECT * FROM etl_log ORDER BY start_time DESC;
+```
+
+---
+
+### Manual Setup (Without Docker)
+
+<details>
+<summary>Click to expand manual setup instructions</summary>
+
+#### Prerequisites
+- **MySQL 8.0+** installed locally
+- **Python 3.8+** with pip
+
+#### Setup Steps 
+
+1. **Install Python packages**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Create MySQL database**:
+   ```sql
+   CREATE DATABASE healthcare_analytics_lab;
+   ```
+
+3. **Load OLTP data**:
+   ```bash
+   mysql -u root -p healthcare_analytics_lab < data/generated_10k_sample_data.sql
+   ```
+
+4. **Run Star Schema ETL**:
+   ```bash
+   mysql -u root -p healthcare_analytics_lab < deliverables/star_schema.sql
+   ```
+
+5. **Start Jupyter**:
+   ```bash
+   jupyter notebook notebooks/healthcare_analytics_exploration.ipynb
+   ```
+
+</details>
+
+---
+
+### Verify Installation
+
+After setup, verify the ETL completed successfully:
+
+```sql
+-- Connect to database
+USE healthcare_analytics_lab;
+
+-- Check ETL execution log
+SELECT 
+    etl_step,
+    start_time,
+    end_time,
+    TIMEDIFF(end_time, start_time) AS duration,
+    rows_affected,
+    status
+FROM etl_log
+ORDER BY start_time DESC;
+
+-- Verify data quality
+SELECT * FROM etl_metadata;
+
+-- Check record counts
+SELECT 
+    'fact_encounters' AS table_name, COUNT(*) AS row_count FROM fact_encounters
+UNION ALL
+SELECT 'dim_patient', COUNT(*) FROM dim_patient
+UNION ALL
+SELECT 'dim_provider', COUNT(*) FROM dim_provider;
+```
+
+**Expected Output:**
+- ✅ All ETL steps show `status = 'SUCCESS'`
+- ✅ fact_encounters: ~10,000 rows
+- ✅ dim_patient: ~10,000 rows
+- ✅ No reconciliation errors
+
+---
+
+## 🔄 Stopping and Restarting
+
+```bash
+# Stop services
+docker-compose down
+
+# Stop and remove all data (fresh start)
+docker-compose down -v
+
+# Restart services
+docker-compose up -d --build
+```
 
 ---
 
