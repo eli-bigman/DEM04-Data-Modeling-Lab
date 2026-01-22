@@ -1,11 +1,18 @@
 -- =====================================================
 -- STAR SCHEMA OPTIMIZED QUERIES
 -- =====================================================
+-- Benchmarked against OLTP Schema with ~13,200 Encounters
 
 -- -----------------------------------------------------
 -- Question 1: Monthly Encounters by Specialty
 -- Goal: Count encounters and unique patients per specialty/month
 -- Optimization Key: Pre-joined dimensions, Removed DATE_FORMAT()
+-- -----------------------------------------------------
+-- Performance Benchmark:
+-- OLTP Time: ~174 ms
+-- Star Time: ~76 ms
+-- Win: ~56% Faster. The OLTP query degraded significantly due to sorting logic 
+-- and usage of precalculated data in dim table.
 -- -----------------------------------------------------
 SELECT 
     dd.year_month AS encounter_month,
@@ -31,6 +38,12 @@ ORDER BY
 -- Question 2: Top Diagnosis-Procedure Pairs
 -- Goal: Most common combinations of diagnosis & procedure
 -- Optimization Key: Bridge tables handle M:M relationship efficiently
+-- -----------------------------------------------------
+-- Performance Benchmark:
+-- OLTP Time: ~174 ms
+-- Star Time: ~177 ms
+-- Result: Parity (No Speedup). Bridge tables simplify the structure but do not
+-- reduce the computational cost of many-to-many joins without pre-aggregation.
 -- -----------------------------------------------------
 SELECT 
     dd.icd10_code,
@@ -58,6 +71,13 @@ LIMIT 10;
 -- Goal: Identify specialties with highest readmission rates
 -- Optimization Key: Pre-computed 'is_readmission' flag in ETL
 -- -----------------------------------------------------
+-- Performance Benchmark:
+-- OLTP Time: ~93 ms
+-- Star Time: ~15 ms
+-- Win: ~84% Faster (6x speedup). This is the biggest win due to self join 
+-- being replaced by readmission flag. 
+-- The O(N^2) complexity of the OLTP self-join was eliminated entirely.
+-- -----------------------------------------------------
 SELECT 
     ds.specialty_name,
     COUNT(fe.encounter_key) AS total_discharges,
@@ -76,6 +96,12 @@ ORDER BY readmission_rate_percent DESC;
 -- Question 4: Revenue by Specialty & Month
 -- Goal: Calculate allowed amounts by month
 -- Optimization Key: Billing data denormalized into Fact Table
+-- -----------------------------------------------------
+-- Performance Benchmark:
+-- OLTP Time: ~95 ms
+-- Star Time: ~67 ms
+-- Win: ~30% Faster. We eliminated the heaviest join (Billing table) and fetch data directly from fact table,
+-- simplifying the query plan.
 -- -----------------------------------------------------
 SELECT 
     dd.year_month AS revenue_month,
