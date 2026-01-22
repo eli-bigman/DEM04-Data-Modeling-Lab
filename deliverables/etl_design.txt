@@ -1,244 +1,99 @@
 HEALTHCARE ANALYTICS LAB - ETL DESIGN
-ETL Strategy & Logic Documentation
+ETL Strategy & Logic Documentation (Updated Implementation)
 ============================================
 
-1. OVERVIEW
+1. OVERVIEW & EXECUTION FLOW
 -----------------------------
-The ETL process transforms data from the normalized OLTP schema (3NF) into
-the optimized Star Schema (Dimensional Model). 
+The data pipeline transforms normalized OLTP data into an optimized Star Schema.
 
-Strategy: Full Refresh (Truncate and Load)
-- For this lab environment, we drop and recreate tables to ensure consistency.
-- In a production environment, this would be converted to an Incremental Load.
+Orchestration (Dockerized):
+The pipeline uses strict sequential execution via `docker-compose` and numbered scripts to ensure idempotency and correctness.
 
-Order of Operations:
-1. Clean Target (DIM -> FACT -> BRIDGE dependency order)
-2. Load Dimensions (Date, Specialty, Department, EncounterType)
-3. Load Heavy Dimensions (Patient, Provider)
-4. Load Fact Table (Encounters)
-5. Update Fact Table (Readmission Flags)
-6. Load Bridge Tables (Diagnoses, Procedures)
+Execution Order:
+1. `01-oltp.sql`: Load Initial OLTP Data (10k records).
+2. `02-oltp-increment.sql`: Simulate Incremental Data (Order +3k records).
+3. `03-star-ddl.sql`: Deploy Star Schema DDL + Metadata Tables.
+4. `04-star-etl.sql`: Execute Incremental ETL Logic.
 
 ============================================
 
 2. DIMENSION LOAD LOGIC
 -----------------------------
 
-DIM_DATE (One-Time Generation)
-- Logic: Use Recursive CTE to generate date sequence for 2024.
+DIM_DATE (Dynamic Generation)
+- Strategy: Stored Procedure (`populate_dim_date`)
+- Logic: Replaced static CTEs with a flexible procedure taking `start_date` and `end_date`.
+- Benefit: Allows generating future dates for forecasting without code changes.
 - Attributes: 
   * `calendar_date`: Sequence date
   * `year`, `month`, `day`: Extracted functions
   * `quarter_name`: CONCAT('Q', QUARTER(dt))
   * `is_weekend`: CASE WHEN DAYOFWEEK IN (1,7) THEN TRUE
+  * `is_holiday`: Placeholder for future logic
 
 DIM_PATIENT (SCD Type 1/2)
-- Logic: Select from OLTP `patients` table.
+- Strategy: Hybrid SCD
+- Logic: Tracks history via `start_date`, `end_date`, and `is_current` flags.
 - Transformation:
-  * `full_name`: CONCAT(first_name, ' ', last_name)
-  * `age`: TIMESTAMPDIFF(YEAR, dob, CURDATE())
-  * `age_group`: CASE statement (0-17, 18-34, 35-54, 55-74, 75+)
-- SCD Handling:
-  * Initial load sets `is_current = TRUE`, `effective_date = CURRENT_DATE`
-  * Future updates would insert new row and close out previous row (SCD Type 2)
+  * `age_group`: Hardcoded buckets (0-17, 18-34, etc.) for standardized reporting.
 
-DIM_PROVIDER (Denormalized)
-- Logic: JOIN `providers` -> `specialties` -> `departments`
-- Denormalization: Access specialty_name and department_name directly.
-- Benefit: Eliminates need for snowflake joins in analytic queries.
-
-DIM_SPECIALTY / DIM_DEPARTMENT / DIM_DIAGNOSIS
-- Logic: Direct SELECT from corresponding OLTP tables.
-- Transformations: 
-  * `specialty_category`: mapped from codes (SURG->Surgical)
-  * `department_type`: mapped from name (ICU->Inpatient)
+DIM_PROVIDER / SPECIALTY / DEPARTMENT
+- Strategy: Denormalized & Type 1
+- Logic: Flattens the OLTP snowflake (Specialty->Department) into the Provider dimension for single-join access.
 
 ============================================
 
-3. FACT TABLE LOAD LOGIC
+3. FACT TABLE LOAD LOGIC (INCREMENTAL)
 -----------------------------
 
 Target: FACT_ENCOUNTERS
-Source: OLTP `encounters` table
+Source: OLTP `encounters`
 
-Dimension Lookups (Surrogate Keys):
-- Join `encounters` to dimensions on Natural Keys (patient_id, provider_id, etc.)
-- Filter dimensions by `is_current = TRUE` to get active surrogate key.
-- Example: 
-  `JOIN dim_patient dp ON e.patient_id = dp.patient_id AND dp.is_current = TRUE`
+Incremental Strategy: **Data-Driven High Watermark**
+- Problem with Timestamp: Reliance on `inserted_at` can miss backfilled data.
+- Solution: Track `high_watermark` based on the **Business Key** (Encounter Date).
+  
+Logic:
+1. Retrieve Watermark: 
+   `SELECT COALESCE(MAX(high_watermark), '1900-01-01') FROM etl_metadata`
+2. Extract Delta:
+   `SELECT * FROM encounters WHERE encounter_date > @last_watermark`
+3. Load & Transform:
+   - Denormalize metrics (Total Allowed Amount)
+   - Lookup Surrogate Keys
+4. Update Watermark:
+   `UPDATE etl_metadata SET high_watermark = (SELECT MAX(encounter_datetime) FROM loaded_batch)`
 
-Pre-Aggregated Metrics:
-1. `diagnosis_count`: 
-   - LEFT JOIN subquery grouping `encounter_diagnoses` by encounter_id.
-   - Use COALESCE(count, 0) to handle zeros.
-2. `procedure_count`:
-   - Same logic as diagnosis_count.
-3. `length_of_stay_days`: 
-   - DATEDIFF(discharge_date, encounter_date)
-4. `total_allowed_amount` & `has_billing`:
-   - LEFT JOIN `billing` table.
-   - Sum allowed_amount.
-   - Set `has_billing` flag if billing_id IS NOT NULL.
-
-Readmission Logic (Complex Update):
-- Initial Insert: Set `is_readmission = FALSE`
-- Post-Load Update:
-  - Self-join `fact_encounters` (f1, f2)
-  - Match on `patient_key`
-  - Condition: f2.date > f1.discharge AND days_between <= 30
-  - Condition: Both are Inpatient
-  - Update f2.is_readmission = TRUE
+Readmission Logic (Optimized):
+- Instead of complex post-load updates, the system now uses optimized lookups.
+- Logic: `is_readmission` flag is computed by checking for prior inpatient discharges within 30 days for the same patient.
 
 ============================================
 
 4. BRIDGE TABLE LOAD LOGIC
 -----------------------------
 
-BRIDGE_ENCOUNTER_DIAGNOSES
-- Source: OLTP `encounter_diagnoses`
+BRIDGE_ENCOUNTER_DIAGNOSES / PROCEDURES
+- Strategy: Full Refresh (Current Implementation) / Append-Only (Target)
 - Logic:
-  1. Join `encounter_diagnoses` to `fact_encounters` (to get `encounter_key`)
-  2. Join to `dim_diagnosis` (to get `diagnosis_key`)
-  3. Select `diagnosis_sequence` directly.
-- Purpose: Resolves Many-to-Many relationship.
-
-BRIDGE_ENCOUNTER_PROCEDURES
-- Source: OLTP `encounter_procedures`
-- Logic: Same as diagnosis bridge.
-- Transformation: Calculate `procedure_sequence` using ROW_NUMBER() over date.
+  - Links `encounter_key` to `diagnosis_key`.
+  - Captures `sequence` (primary, secondary, etc.).
+- Purpose: Efficiently models the Many-to-Many relationship without exploding the Fact table grain.
 
 ============================================
 
-5. REFRESH STRATEGY
+5. INFRASTRUCTURE & SCALABILITY
 -----------------------------
 
-Production Schedule: Daily Nightly Batch (02:00 AM)
+Scalability Validated:
+- The system was stress-tested with a 13.2k dataset (30% increase).
+- **OLTP**: Showed fragility (latency tripled).
+- **OLAP**: Scaled linearly (latency remained flat or grew proportionally).
 
-Incremental Load Logic:
-1. Identify new/changed source records (using `last_updated` timestamp if avail).
-2. **Dimension Logic**:
-   - Check if natural key exists.
-   - If attributes changed (e.g., patient moved), Insert New Row (SCD Type 2).
-   - Update old row `expiration_date` = yesterday.
-   - If new key, simple Insert.
-3. **Fact Logic**:
-   - Load encounters where `encounter_date` >= Last_Load_Date.
-   - Re-run Readmission Update logic for rolling 30-day window.
+Idempotency:
+- The ETL script is designed to be re-runnable.
+- `INSERT IGNORE` or `ON DUPLICATE KEY UPDATE` patterns prevent data duplication during re-runs.
 
-Late Arriving Facts:
-- Issue: Encounter arrives before Patient record exists.
-- Strategy: Insert "Unknown Patient" dummy record in dimension.
-- Assign fact to "Unknown Patient" key.
-- Update fact key when true patient record arrives.
-
-Data Quality Checks:
-- Alert if `fact_encounters` count != Source count.
-- Alert if `total_revenue` checksum differs > 1%.
-- Alert if `unmapped_keys` count > 0.
-============================================
-
-5. INCREMENTAL ETL STRATEGY 
------------------------------
-
-CURRENT STATE: Full Refresh
-- ETL truncates and reloads all data each run
-- Acceptable for 10K encounters (~5 seconds)
-- NOT scalable for production (500K+ daily encounters)
-
-PRODUCTION TARGET: Incremental Loading with CDC
-
-APPROACH A: Timestamp-Based Incremental Load
------------------------------
-Prerequisites:
-- Add `last_modified TIMESTAMP` column to OLTP tables:
-  ALTER TABLE encounters ADD COLUMN last_modified TIMESTAMP 
-      DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
-  
-- Create `etl_metadata` table (already implemented in star_schema.sql)
-
-Incremental Logic:
-1. Query watermark from last successful run:
-   SELECT MAX(last_etl_timestamp) FROM etl_metadata WHERE table_name = 'fact_encounters';
-
-2. Load only changed records:
-   INSERT INTO fact_encounters (...)
-   SELECT ...
-   FROM encounters e
-   WHERE e.last_modified > @last_watermark
-      OR e.encounter_id NOT IN (SELECT encounter_id FROM fact_encounters);
-
-3. Update metadata:
-   UPDATE etl_metadata 
-   SET last_etl_timestamp = NOW() 
-   WHERE table_name = 'fact_encounters';
-
-Benefits:
-- Only process new/changed records (10-100x faster)
-- Reduces downtime window from hours to minutes
-- Supports near-real-time analytics (15-min micro-batches)
-
-APPROACH B: Change Data Capture (CDC) - Enterprise
------------------------------
-Tools: Debezium, AWS DMS, GoldenGate
-
-Strategy:
-1. Enable MySQL binlog replication
-2. Stream changes to Kafka topic
-3. Consumer processes inserts/updates/deletes incrementally
-4. Near real-time (< 1 minute latency)
-
-Trade-offs:
-✅ Real-time data availability
-✅ No batch window needed
-❌ More complex infrastructure
-❌ Higher operational cost
-
-READMISSION FLAG OPTIMIZATION
------------------------------
-Current: Self-join UPDATE after fact load (expensive at scale)
-
-Improved: Compute during INSERT using window functions
-
-WITH ranked_encounters AS (
-    SELECT 
-        e.*,
-        LAG(e.discharge_date) OVER (
-            PARTITION BY e.patient_id 
-            ORDER BY e.encounter_date
-        ) AS prev_discharge,
-        DATEDIFF(e.encounter_date, 
-            LAG(e.discharge_date) OVER (...)
-        ) AS days_since_discharge
-    FROM encounters e
-)
-INSERT INTO fact_encounters (is_readmission, ...)
-SELECT 
-    CASE 
-        WHEN days_since_discharge <= 30 AND encounter_type = 'Inpatient'
-        THEN TRUE 
-        ELSE FALSE 
-    END,
-    ...
-FROM ranked_encounters;
-
-Benefits:
-- Single pass (5x faster than self-join)
-- Transactionally safe
-- Works with incremental loads
-
-IMPLEMENTATION ROADMAP
------------------------------
-Week 1: Add last_modified columns to OLTP (requires schema migration)
-Week 2: Test timestamp-based incremental load with 100K records
-Week 3: Refactor readmission logic to use window functions
-Week 4: Load test with 1M+ encounters, tune performance
-Week 5: Production deployment with monitoring
-
-EXPECTED PERFORMANCE AT SCALE
------------------------------
-| Encounters | Full Refresh | Incremental (1% daily change) |
-|------------|--------------|-------------------------------|
-| 100K       | 50 sec       | 5 sec                         |
-| 1M         | 8 min        | 30 sec                        |
-| 10M        | 90 min       | 2 min                         |
-| 100M       | 15 hours     | 10 min                        |
+Future Optimizations:
+- **Snapshot Facts**: For frequent Q2-style queries (Diagnosis-Procedure pairs), a periodic snapshot fact would eliminate the runtime cost of 4-way bridge joins.
+- **Partitioning**: Partition `fact_encounters` by `date_key` (Year-Month) for archival efficiency.
