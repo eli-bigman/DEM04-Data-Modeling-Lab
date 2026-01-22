@@ -10,10 +10,10 @@
 
 SET @etl_start_time = NOW();
 
--- Get High Watermark: Last successful load timestamp
--- If first run or no successful load, default to 1900-01-01 (load everything)
+-- Get High Watermark: Last successfully loaded encounter date
+-- Default to 1900-01-01 if no successful load exists
 SET @last_watermark = (
-    SELECT COALESCE(MAX(last_etl_timestamp), '1900-01-01 00:00:00') 
+    SELECT COALESCE(MAX(high_watermark), '1900-01-01 00:00:00') 
     FROM etl_metadata 
     WHERE table_name = 'fact_encounters' 
       AND last_etl_status = 'SUCCESS'
@@ -37,33 +37,64 @@ INSERT INTO etl_log (etl_step, status) VALUES ('load_dimensions_incremental', 'R
 SET @dim_log_id = LAST_INSERT_ID();
 
 -- -----------------------------------------------------
--- dim_date: Incremental (Only add missing dates)
--- Strategy: Insert dates that don't exist yet
+-- dim_date: Generated via stored procedure
+-- Strategy: Populate range covering expected data
 -- -----------------------------------------------------
 
-INSERT IGNORE INTO dim_date (calendar_date, `year`, `quarter`, quarter_name, `month`, month_name, `year_month`, week_of_year, day_of_month, day_of_week, day_name, is_weekend)
-WITH RECURSIVE date_range AS (
-    SELECT DATE('2024-01-01') AS dt
-    UNION ALL
-    SELECT DATE_ADD(dt, INTERVAL 1 DAY)
-    FROM date_range
-    WHERE dt < '2026-12-31'  -- Extended range for future dates
-)
-SELECT 
-    dt AS calendar_date,
-    YEAR(dt) AS `year`,
-    QUARTER(dt) AS `quarter`,
-    CONCAT('Q', QUARTER(dt)) AS quarter_name,
-    MONTH(dt) AS `month`,
-    DATE_FORMAT(dt, '%M') AS month_name,
-    DATE_FORMAT(dt, '%Y-%m') AS `year_month`,
-    WEEK(dt, 1) AS week_of_year,
-    DAY(dt) AS day_of_month,
-    DAYOFWEEK(dt) AS day_of_week,
-    DATE_FORMAT(dt, '%W') AS day_name,
-    DAYOFWEEK(dt) IN (1, 7) AS is_weekend
-FROM date_range
-WHERE dt NOT IN (SELECT calendar_date FROM dim_date);
+DELIMITER //
+
+DROP PROCEDURE IF EXISTS populate_dim_date//
+
+CREATE PROCEDURE populate_dim_date(IN start_date DATE, IN end_date DATE)
+BEGIN
+    DECLARE current_date_val DATE;
+    SET current_date_val = start_date;
+
+    -- Avoid nested transactions if called within one
+    -- START TRANSACTION; 
+
+    WHILE current_date_val <= end_date DO
+        INSERT IGNORE INTO dim_date (
+            calendar_date,
+            `year`,
+            `quarter`,
+            quarter_name,
+            `month`,
+            month_name,
+            `year_month`,
+            week_of_year,
+            day_of_month,
+            day_of_week,
+            day_name,
+            is_weekend,
+            is_holiday
+        ) VALUES (
+            current_date_val,
+            YEAR(current_date_val),
+            QUARTER(current_date_val),
+            CONCAT('Q', QUARTER(current_date_val)),
+            MONTH(current_date_val),
+            DATE_FORMAT(current_date_val, '%M'),
+            DATE_FORMAT(current_date_val, '%Y-%m'),
+            WEEK(current_date_val, 1),
+            DAY(current_date_val),
+            DAYOFWEEK(current_date_val),
+            DATE_FORMAT(current_date_val, '%W'),
+            CASE WHEN DAYOFWEEK(current_date_val) IN (1, 7) THEN TRUE ELSE FALSE END,
+            FALSE
+        );
+
+        SET current_date_val = DATE_ADD(current_date_val, INTERVAL 1 DAY);
+    END WHILE;
+
+    -- COMMIT;
+    
+    -- SELECT CONCAT('Successfully populated dim_date from ', start_date, ' to ', end_date) AS status;
+END//
+
+DELIMITER ;
+
+CALL populate_dim_date('2024-01-01', '2026-12-31');
 
 -- -----------------------------------------------------
 -- dim_specialty: Upsert (SCD Type 1 - Overwrite)
@@ -323,8 +354,7 @@ WHERE log_id = @dim_log_id;
 
 -- =====================================================
 -- SECTION 2: FACT TABLE INCREMENTAL LOAD
--- Strategy: Only load encounters AFTER the high watermark
---           OR encounters not yet in fact table
+-- Strategy: Only load encounters AFTER the high watermark (by DATE)
 -- =====================================================
 
 START TRANSACTION;
@@ -332,7 +362,7 @@ START TRANSACTION;
 INSERT INTO etl_log (etl_step, status) VALUES ('load_fact_incremental', 'RUNNING');
 SET @fact_log_id = LAST_INSERT_ID();
 
--- Incremental Fact Load: Only NEW encounters
+-- Incremental Fact Load: Encounters > @last_watermark
 INSERT INTO fact_encounters (
     date_key, patient_key, provider_key, specialty_key, department_key, encounter_type_key,
     encounter_id, patient_id, provider_id,
@@ -360,7 +390,7 @@ SELECT
     CASE WHEN b.billing_id IS NOT NULL THEN TRUE ELSE FALSE END AS has_billing
 FROM encounters e
 -- ===========================================================
--- INCREMENTAL FILTER: Only load NEW encounters
+-- INCREMENTAL FILTER: Only load NEW encounters based on DATE
 -- ===========================================================
 LEFT JOIN fact_encounters existing ON e.encounter_id = existing.encounter_id
 -- ===========================================================
@@ -383,12 +413,23 @@ LEFT JOIN (
 ) proc_cnt ON e.encounter_id = proc_cnt.encounter_id
 WHERE existing.encounter_id IS NULL  -- Not already loaded
   AND (
-      e.encounter_date > @last_watermark  -- After last successful run
+      e.encounter_date > @last_watermark  -- After last successful loaded DATE
       OR @last_watermark = '1900-01-01 00:00:00'  -- First run: load all
   );
 
 -- Store count of newly loaded records
 SET @new_fact_count = ROW_COUNT();
+
+-- CALCULATE NEW HIGH WATERMARK
+SET @new_watermark_value = (
+    SELECT MAX(encounter_datetime) 
+    FROM fact_encounters 
+    WHERE created_date >= @etl_start_time
+);
+
+-- If nothing loaded, keep old watermark
+SET @final_watermark = COALESCE(@new_watermark_value, @last_watermark);
+
 
 -- Compute is_readmission flag for ALL encounters (including newly loaded)
 -- A new encounter might trigger readmission for a previous one
@@ -398,10 +439,13 @@ SET SQL_SAFE_UPDATES = 0;
 CREATE TEMPORARY TABLE temp_affected_patients AS
 SELECT DISTINCT patient_id FROM fact_encounters WHERE created_date >= @etl_start_time;
 
--- Reset readmission flags for patients affected by new loads
+-- Add index for faster JOIN
+ALTER TABLE temp_affected_patients ADD INDEX idx_patient_id (patient_id);
+
+-- Reset readmission flags for patients affected by new loads (Using JOIN instead of IN subquery)
 UPDATE fact_encounters fe
-SET fe.is_readmission = FALSE
-WHERE fe.patient_id IN (SELECT patient_id FROM temp_affected_patients);
+INNER JOIN temp_affected_patients tap ON fe.patient_id = tap.patient_id
+SET fe.is_readmission = FALSE;
 
 -- Create temp table for readmissions
 CREATE TEMPORARY TABLE temp_readmissions AS
@@ -487,14 +531,15 @@ WHERE log_id = @bridge_log_id;
 -- Run reconciliation checks
 CALL reconcile_etl_data();
 
--- Update ETL Metadata with NEW High Watermark
-INSERT INTO etl_metadata (table_name, last_etl_timestamp, last_etl_status, rows_processed)
+-- Update ETL Metadata with NEW High Watermark (Encounter Date)
+INSERT INTO etl_metadata (table_name, last_etl_timestamp, high_watermark, last_etl_status, rows_processed)
 VALUES 
-    ('fact_encounters', NOW(), 'SUCCESS', @new_fact_count),
-    ('dim_patient', NOW(), 'SUCCESS', (SELECT COUNT(*) FROM dim_patient WHERE is_current = TRUE)),
-    ('dim_provider', NOW(), 'SUCCESS', (SELECT COUNT(*) FROM dim_provider WHERE is_current = TRUE))
+    ('fact_encounters', NOW(), @final_watermark, 'SUCCESS', @new_fact_count),
+    ('dim_patient', NOW(), '1900-01-01', 'SUCCESS', (SELECT COUNT(*) FROM dim_patient WHERE is_current = TRUE)),
+    ('dim_provider', NOW(), '1900-01-01', 'SUCCESS', (SELECT COUNT(*) FROM dim_provider WHERE is_current = TRUE))
 ON DUPLICATE KEY UPDATE
     last_etl_timestamp = NOW(),
+    high_watermark = VALUES(high_watermark),
     last_etl_status = 'SUCCESS',
     rows_processed = VALUES(rows_processed);
 
@@ -512,7 +557,7 @@ WHERE log_id = @batch_log_id;
 SELECT 
     'INCREMENTAL ETL COMPLETED' AS status,
     @last_watermark AS previous_watermark,
-    NOW() AS new_watermark,
+    @final_watermark AS new_watermark,
     @new_fact_count AS new_encounters_loaded,
     (SELECT COUNT(*) FROM fact_encounters) AS total_encounters,
     (SELECT COUNT(*) FROM dim_patient WHERE is_current = TRUE) AS active_patients,
@@ -521,4 +566,3 @@ SELECT
     (SELECT SUM(total_allowed_amount) FROM fact_encounters) AS total_revenue,
     (SELECT COUNT(*) FROM fact_encounters WHERE is_readmission = TRUE) AS total_readmissions,
     TIMEDIFF(NOW(), @etl_start_time) AS execution_time;
-
