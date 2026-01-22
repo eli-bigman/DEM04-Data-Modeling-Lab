@@ -86,21 +86,30 @@ The optimized analytical database using dimensional modeling:
 
 ```
 ├── README.md                          # This file
-├── Instruction.txt                    # Original project requirements
+├── Inspection.txt                     # Original project requirements
 ├── data/
-│   └── generated_10k_sample_data.sql  # 10,000 sample records for OLTP database
+│   ├── generated_10k_sample_data.sql  # 10,000 initial sample records
+│   └── generate_increment_3k_data.sql # 3,000 incremental records for validaton
 ├── diagrams/
 │   ├── erd_diagram.png                # OLTP normalized schema diagram
 │   └── star_schema.png                # Star schema dimensional model
 ├── notebooks/
 │   └── healthcare_analytics_exploration.ipynb  # Interactive analysis & benchmarks
 └── deliverables/
-    ├── star_schema.sql                # DDL + ETL scripts for star schema
+    ├── DDL_star_shema.sql             # Star Schema Table Definitions
+    ├── star_schema.sql                # Incremental ETL Logic
     ├── star_schema_queries.txt        # Optimized analytical queries
     ├── design_decisions.txt           # Dimensional modeling justifications
     ├── etl_design.txt                 # ETL strategy & SCD handling
+    ├── query_analysis.txt             # Detailed query performance breakdown
     └── reflection.md                  # Performance analysis & lessons learned
 ```
+
+## 🔄 Incremental Load Simulation
+To allow for realistic stress-testing, the environment simulates an active transactional system:
+1.  **Initial Load**: 10,000 encounters loaded from `generated_10k_sample_data.sql`.
+2.  **Incremental Load**: 3,000 additional encounters loaded from `generate_increment_3k_data.sql`.
+3.  **ETL Execution**: The `star_schema.sql` script is designed to run efficiently over this changing dataset, using a **High Watermark** strategy to process only new records.
 
 ---
 
