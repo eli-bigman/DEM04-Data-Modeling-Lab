@@ -38,6 +38,7 @@ CREATE TABLE etl_metadata (
     last_etl_timestamp TIMESTAMP NOT NULL,
     last_etl_status ENUM('SUCCESS', 'FAILED', 'RUNNING', 'NOT_STARTED') DEFAULT 'NOT_STARTED',
     rows_processed INT DEFAULT 0,
+    high_watermark DATETIME DEFAULT '1900-01-01 00:00:00',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE INDEX idx_table_name (table_name)
