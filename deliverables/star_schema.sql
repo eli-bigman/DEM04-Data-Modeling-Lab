@@ -1,399 +1,53 @@
 -- =====================================================
--- HEALTHCARE ANALYTICS LAB - STAR SCHEMA DDL & ETL
--- Optimized Dimensional Model for Analytics
--- Grain: One row per encounter | 8 Dimensions + 1 Fact + 2 Bridges
-
+-- HEALTHCARE ANALYTICS LAB - STAR SCHEMA INCREMENTAL ETL
+-- Strategy: Delta Load with High Watermarks + SCD Type 2
+-- Run Mode: Idempotent (Safe to re-run multiple times)
 -- =====================================================
 
 -- =====================================================
--- SECTION 0: ETL METADATA & DATA QUALITY INFRASTRUCTURE
+-- SECTION 0: ETL INITIALIZATION & WATERMARK SETUP
 -- =====================================================
-
--- Drop existing tables in dependency order
-DROP TABLE IF EXISTS bridge_encounter_procedures;
-DROP TABLE IF EXISTS bridge_encounter_diagnoses;
-DROP TABLE IF EXISTS fact_encounters;
-DROP TABLE IF EXISTS dim_encounter_type;
-DROP TABLE IF EXISTS dim_department;
-DROP TABLE IF EXISTS dim_specialty;
-DROP TABLE IF EXISTS dim_provider;
-DROP TABLE IF EXISTS dim_patient;
-DROP TABLE IF EXISTS dim_date;
-DROP TABLE IF EXISTS dim_diagnosis;
-DROP TABLE IF EXISTS dim_procedure;
-DROP TABLE IF EXISTS etl_metadata;
-DROP TABLE IF EXISTS etl_log;
-
--- ETL Metadata Table: Track incremental load watermarks
-CREATE TABLE etl_metadata (
-    metadata_id INT AUTO_INCREMENT PRIMARY KEY,
-    table_name VARCHAR(100) NOT NULL,
-    last_etl_timestamp TIMESTAMP NOT NULL,
-    last_etl_status ENUM('SUCCESS', 'FAILED', 'RUNNING') DEFAULT 'SUCCESS',
-    rows_processed INT DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE INDEX idx_table_name (table_name)
-);
-
--- ETL Log Table: Detailed execution logging
-CREATE TABLE etl_log (
-    log_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    etl_step VARCHAR(100) NOT NULL,
-    start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    end_time TIMESTAMP NULL,
-    rows_affected INT DEFAULT 0,
-    status ENUM('RUNNING', 'SUCCESS', 'FAILED') DEFAULT 'RUNNING',
-    error_message TEXT NULL,
-    INDEX idx_etl_step (etl_step),
-    INDEX idx_start_time (start_time),
-    INDEX idx_status (status)
-);
-
--- Data Quality Validation Stored Procedure
-DELIMITER //
-CREATE PROCEDURE validate_source_data()
-BEGIN
-    DECLARE error_count INT DEFAULT 0;
-    DECLARE error_msg TEXT;
-    
-    -- Validation 1: No encounters with discharge before admission
-    SELECT COUNT(*) INTO error_count
-    FROM encounters
-    WHERE discharge_date IS NOT NULL 
-      AND discharge_date < encounter_date;
-    
-    IF error_count > 0 THEN
-        SET error_msg = CONCAT('DATA QUALITY FAIL: ', error_count, 
-            ' encounters have discharge_date < encounter_date');
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = error_msg;
-    END IF;
-    
-    -- Validation 2: No negative billing amounts
-    SELECT COUNT(*) INTO error_count
-    FROM billing
-    WHERE allowed_amount < 0 OR claim_amount < 0;
-    
-    IF error_count > 0 THEN
-        SET error_msg = CONCAT('DATA QUALITY FAIL: ', error_count, 
-            ' billing records have negative amounts');
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = error_msg;
-    END IF;
-    
-    -- Validation 3: All encounters have valid patient references
-    SELECT COUNT(*) INTO error_count
-    FROM encounters e
-    LEFT JOIN patients p ON e.patient_id = p.patient_id
-    WHERE p.patient_id IS NULL;
-    
-    IF error_count > 0 THEN
-        SET error_msg = CONCAT('DATA QUALITY FAIL: ', error_count, 
-            ' encounters have invalid patient_id (orphaned records)');
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = error_msg;
-    END IF;
-    
-    -- Validation 4: All encounters have valid provider references
-    SELECT COUNT(*) INTO error_count
-    FROM encounters e
-    LEFT JOIN providers p ON e.provider_id = p.provider_id
-    WHERE p.provider_id IS NULL;
-    
-    IF error_count > 0 THEN
-        SET error_msg = CONCAT('DATA QUALITY FAIL: ', error_count, 
-            ' encounters have invalid provider_id');
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = error_msg;
-    END IF;
-    
-    -- All validations passed
-    SELECT 'SUCCESS: All pre-ETL data quality checks passed' AS validation_status;
-END//
-DELIMITER ;
-
--- Data Reconciliation Stored Procedure (Post-ETL)
-DELIMITER //
-CREATE PROCEDURE reconcile_etl_data()
-BEGIN
-    DECLARE oltp_encounter_count INT;
-    DECLARE star_encounter_count INT;
-    DECLARE oltp_revenue DECIMAL(15,2);
-    DECLARE star_revenue DECIMAL(15,2);
-    DECLARE revenue_diff DECIMAL(15,2);
-    
-    -- Row count reconciliation
-    SELECT COUNT(*) INTO oltp_encounter_count FROM encounters;
-    SELECT COUNT(*) INTO star_encounter_count FROM fact_encounters;
-    
-    IF oltp_encounter_count != star_encounter_count THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'RECONCILIATION FAIL: Row count mismatch between OLTP and Star';
-    END IF;
-    
-    -- Revenue reconciliation
-    SELECT COALESCE(SUM(allowed_amount), 0) INTO oltp_revenue FROM billing;
-    SELECT COALESCE(SUM(total_allowed_amount), 0) INTO star_revenue FROM fact_encounters;
-    SET revenue_diff = ABS(oltp_revenue - star_revenue);
-    
-    IF revenue_diff > 0.01 THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'RECONCILIATION FAIL: Revenue mismatch exceeds tolerance';
-    END IF;
-    
-    -- Success message
-    SELECT 
-        'SUCCESS: ETL Reconciliation Passed' AS status,
-        oltp_encounter_count AS oltp_encounters,
-        star_encounter_count AS star_encounters,
-        oltp_revenue AS oltp_total_revenue,
-        star_revenue AS star_total_revenue,
-        revenue_diff AS revenue_difference;
-END//
-DELIMITER ;
-
--- =====================================================
--- SECTION 1: DIMENSION TABLES (DDL)
--- =====================================================
-
--- =====================================================
--- DIMENSION: dim_date
--- =====================================================
-
-CREATE TABLE dim_date (
-    date_key INT AUTO_INCREMENT PRIMARY KEY,
-    calendar_date DATE NOT NULL UNIQUE,
-    `year` INT NOT NULL,
-    `quarter` INT NOT NULL,
-    quarter_name VARCHAR(2),
-    `month` INT NOT NULL,
-    month_name VARCHAR(20),
-    `year_month` VARCHAR(7) NOT NULL,
-    week_of_year INT,
-    day_of_month INT,
-    day_of_week INT,
-    day_name VARCHAR(20),
-    is_weekend BOOLEAN DEFAULT FALSE,
-    is_holiday BOOLEAN DEFAULT FALSE,
-    INDEX idx_calendar_date (calendar_date),
-    INDEX idx_year_month (`year_month`)
-);
-
--- =====================================================
--- DIMENSION: dim_patient
--- =====================================================
-
-CREATE TABLE dim_patient (
-    patient_key INT AUTO_INCREMENT PRIMARY KEY,
-    patient_id INT NOT NULL,
-    mrn VARCHAR(20) NOT NULL,
-    first_name VARCHAR(100),
-    last_name VARCHAR(100),
-    full_name VARCHAR(200),
-    date_of_birth DATE,
-    age INT,
-    age_group VARCHAR(20),
-    gender CHAR(1),
-    effective_date DATE DEFAULT (CURRENT_DATE),
-    expiration_date DATE DEFAULT '9999-12-31',
-    is_current BOOLEAN DEFAULT TRUE,
-    INDEX idx_patient_id (patient_id),
-    INDEX idx_mrn (mrn),
-    INDEX idx_is_current (is_current)
-);
-
--- =====================================================
--- DIMENSION: dim_specialty
--- =====================================================
-
-CREATE TABLE dim_specialty (
-    specialty_key INT AUTO_INCREMENT PRIMARY KEY,
-    specialty_id INT NOT NULL UNIQUE,
-    specialty_name VARCHAR(100) NOT NULL,
-    specialty_code VARCHAR(10),
-    specialty_category VARCHAR(50),
-    INDEX idx_specialty_id (specialty_id)
-);
-
--- =====================================================
--- DIMENSION: dim_department
--- =====================================================
-
-CREATE TABLE dim_department (
-    department_key INT AUTO_INCREMENT PRIMARY KEY,
-    department_id INT NOT NULL UNIQUE,
-    department_name VARCHAR(100) NOT NULL,
-    floor INT,
-    capacity INT,
-    department_type VARCHAR(50),
-    INDEX idx_department_id (department_id)
-);
-
--- =====================================================
--- DIMENSION: dim_provider (DENORMALIZED)
--- =====================================================
-
-CREATE TABLE dim_provider (
-    provider_key INT AUTO_INCREMENT PRIMARY KEY,
-    provider_id INT NOT NULL,
-    first_name VARCHAR(100),
-    last_name VARCHAR(100),
-    full_name VARCHAR(200),
-    credential VARCHAR(20),
-    specialty_id INT,
-    specialty_name VARCHAR(100),
-    specialty_code VARCHAR(10),
-    department_id INT,
-    department_name VARCHAR(100),
-    effective_date DATE DEFAULT (CURRENT_DATE),
-    expiration_date DATE DEFAULT '9999-12-31',
-    is_current BOOLEAN DEFAULT TRUE,
-    INDEX idx_provider_id (provider_id),
-    INDEX idx_specialty_id (specialty_id),
-    INDEX idx_is_current (is_current)
-);
-
--- =====================================================
--- DIMENSION: dim_encounter_type
--- =====================================================
-
-CREATE TABLE dim_encounter_type (
-    encounter_type_key INT AUTO_INCREMENT PRIMARY KEY,
-    encounter_type VARCHAR(50) NOT NULL UNIQUE,
-    encounter_type_category VARCHAR(50),
-    expected_los_days INT,
-    INDEX idx_encounter_type (encounter_type)
-);
-
--- =====================================================
--- DIMENSION: dim_diagnosis
--- =====================================================
-
-CREATE TABLE dim_diagnosis (
-    diagnosis_key INT AUTO_INCREMENT PRIMARY KEY,
-    diagnosis_id INT NOT NULL UNIQUE,
-    icd10_code VARCHAR(10) NOT NULL,
-    icd10_description VARCHAR(200),
-    icd10_category VARCHAR(100),
-    INDEX idx_diagnosis_id (diagnosis_id),
-    INDEX idx_icd10_code (icd10_code)
-);
-
--- =====================================================
--- DIMENSION: dim_procedure
--- =====================================================
-
-CREATE TABLE dim_procedure (
-    procedure_key INT AUTO_INCREMENT PRIMARY KEY,
-    procedure_id INT NOT NULL UNIQUE,
-    cpt_code VARCHAR(10) NOT NULL,
-    cpt_description VARCHAR(200),
-    procedure_category VARCHAR(100),
-    INDEX idx_procedure_id (procedure_id),
-    INDEX idx_cpt_code (cpt_code)
-);
-
--- =====================================================
--- FACT TABLE: fact_encounters
--- =====================================================
-
-CREATE TABLE fact_encounters (
-    encounter_key INT AUTO_INCREMENT PRIMARY KEY,
-    date_key INT NOT NULL,
-    patient_key INT NOT NULL,
-    provider_key INT NOT NULL,
-    specialty_key INT NOT NULL,
-    department_key INT NOT NULL,
-    encounter_type_key INT NOT NULL,
-    encounter_id INT NOT NULL UNIQUE,
-    patient_id INT,
-    provider_id INT,
-    encounter_datetime DATETIME,
-    discharge_datetime DATETIME,
-    diagnosis_count INT DEFAULT 0,
-    procedure_count INT DEFAULT 0,
-    length_of_stay_days INT,
-    total_claim_amount DECIMAL(12, 2),
-    total_allowed_amount DECIMAL(12, 2),
-    is_readmission BOOLEAN DEFAULT FALSE,
-    has_billing BOOLEAN DEFAULT FALSE,
-    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT fk_fact_date FOREIGN KEY (date_key) REFERENCES dim_date(date_key),
-    CONSTRAINT fk_fact_patient FOREIGN KEY (patient_key) REFERENCES dim_patient(patient_key),
-    CONSTRAINT fk_fact_provider FOREIGN KEY (provider_key) REFERENCES dim_provider(provider_key),
-    CONSTRAINT fk_fact_specialty FOREIGN KEY (specialty_key) REFERENCES dim_specialty(specialty_key),
-    CONSTRAINT fk_fact_department FOREIGN KEY (department_key) REFERENCES dim_department(department_key),
-    CONSTRAINT fk_fact_encounter_type FOREIGN KEY (encounter_type_key) REFERENCES dim_encounter_type(encounter_type_key),
-    INDEX idx_date_key (date_key),
-    INDEX idx_patient_key (patient_key),
-    INDEX idx_provider_key (provider_key),
-    INDEX idx_specialty_key (specialty_key),
-    INDEX idx_encounter_type_key (encounter_type_key),
-    INDEX idx_encounter_datetime (encounter_datetime),
-    INDEX idx_is_readmission (is_readmission),
-    INDEX idx_date_specialty (date_key, specialty_key),
-    INDEX idx_date_encounter_type (date_key, encounter_type_key),
-    INDEX idx_specialty_encounter_type (specialty_key, encounter_type_key)
-);
-
--- =====================================================
--- BRIDGE: bridge_encounter_diagnoses
--- =====================================================
-
-CREATE TABLE bridge_encounter_diagnoses (
-    encounter_key INT NOT NULL,
-    diagnosis_key INT NOT NULL,
-    diagnosis_sequence INT,
-    diagnosis_date DATE,
-    PRIMARY KEY (encounter_key, diagnosis_key),
-    CONSTRAINT fk_bridge_diag_encounter FOREIGN KEY (encounter_key) REFERENCES fact_encounters(encounter_key),
-    CONSTRAINT fk_bridge_diag_diagnosis FOREIGN KEY (diagnosis_key) REFERENCES dim_diagnosis(diagnosis_key),
-    INDEX idx_encounter_key (encounter_key),
-    INDEX idx_diagnosis_key (diagnosis_key)
-);
-
--- =====================================================
--- BRIDGE: bridge_encounter_procedures
--- =====================================================
-
-CREATE TABLE bridge_encounter_procedures (
-    encounter_key INT NOT NULL,
-    procedure_key INT NOT NULL,
-    procedure_sequence INT,
-    procedure_date DATE,
-    PRIMARY KEY (encounter_key, procedure_key),
-    CONSTRAINT fk_bridge_proc_encounter FOREIGN KEY (encounter_key) REFERENCES fact_encounters(encounter_key),
-    CONSTRAINT fk_bridge_proc_procedure FOREIGN KEY (procedure_key) REFERENCES dim_procedure(procedure_key),
-    INDEX idx_encounter_key (encounter_key),
-    INDEX idx_procedure_key (procedure_key)
-);
-
--- =====================================================
--- SECTION 2: ETL EXECUTION WITH TRANSACTION MANAGEMENT
--- =====================================================
-
--- Log ETL start
-INSERT INTO etl_log (etl_step, status) 
-VALUES ('star_schema_full_load', 'RUNNING');
 
 SET @etl_start_time = NOW();
-SET @log_id = LAST_INSERT_ID();
+
+-- Get High Watermark: Last successful load timestamp
+-- If first run or no successful load, default to 1900-01-01 (load everything)
+SET @last_watermark = (
+    SELECT COALESCE(MAX(last_etl_timestamp), '1900-01-01 00:00:00') 
+    FROM etl_metadata 
+    WHERE table_name = 'fact_encounters' 
+      AND last_etl_status = 'SUCCESS'
+);
+
+-- Log ETL batch start
+INSERT INTO etl_log (etl_step, status, error_message) 
+VALUES ('incremental_etl_batch', 'RUNNING', CONCAT('Watermark: ', @last_watermark));
+SET @batch_log_id = LAST_INSERT_ID();
 
 -- Step 1: Pre-ETL Data Quality Validation
 CALL validate_source_data();
 
--- Step 2: Begin Transaction for Dimension Loads
+-- =====================================================
+-- SECTION 1: DIMENSION LOADS (Incremental + SCD Type 2)
+-- =====================================================
+
 START TRANSACTION;
 
--- Log dimension load start
-INSERT INTO etl_log (etl_step, status) VALUES ('load_dimensions', 'RUNNING');
+INSERT INTO etl_log (etl_step, status) VALUES ('load_dimensions_incremental', 'RUNNING');
+SET @dim_log_id = LAST_INSERT_ID();
 
--- Load dim_date (2024 calendar year)
-INSERT INTO dim_date (calendar_date, `year`, `quarter`, quarter_name, `month`, month_name, `year_month`, week_of_year, day_of_month, day_of_week, day_name, is_weekend)
+-- -----------------------------------------------------
+-- dim_date: Incremental (Only add missing dates)
+-- Strategy: Insert dates that don't exist yet
+-- -----------------------------------------------------
+
+INSERT IGNORE INTO dim_date (calendar_date, `year`, `quarter`, quarter_name, `month`, month_name, `year_month`, week_of_year, day_of_month, day_of_week, day_name, is_weekend)
 WITH RECURSIVE date_range AS (
     SELECT DATE('2024-01-01') AS dt
     UNION ALL
     SELECT DATE_ADD(dt, INTERVAL 1 DAY)
     FROM date_range
-    WHERE dt < '2024-12-31'
+    WHERE dt < '2026-12-31'  -- Extended range for future dates
 )
 SELECT 
     dt AS calendar_date,
@@ -408,9 +62,13 @@ SELECT
     DAYOFWEEK(dt) AS day_of_week,
     DATE_FORMAT(dt, '%W') AS day_name,
     DAYOFWEEK(dt) IN (1, 7) AS is_weekend
-FROM date_range;
+FROM date_range
+WHERE dt NOT IN (SELECT calendar_date FROM dim_date);
 
--- Load dim_specialty from OLTP
+-- -----------------------------------------------------
+-- dim_specialty: Upsert (SCD Type 1 - Overwrite)
+-- -----------------------------------------------------
+
 INSERT INTO dim_specialty (specialty_id, specialty_name, specialty_code, specialty_category)
 SELECT 
     specialty_id,
@@ -421,9 +79,16 @@ SELECT
         WHEN specialty_code IN ('RAD', 'PATH', 'ANES') THEN 'Diagnostic/Support'
         ELSE 'Medical'
     END AS specialty_category
-FROM specialties;
+FROM specialties
+ON DUPLICATE KEY UPDATE
+    specialty_name = VALUES(specialty_name),
+    specialty_code = VALUES(specialty_code),
+    specialty_category = VALUES(specialty_category);
 
--- Load dim_department from OLTP
+-- -----------------------------------------------------
+-- dim_department: Upsert (SCD Type 1 - Overwrite)
+-- -----------------------------------------------------
+
 INSERT INTO dim_department (department_id, department_name, floor, capacity, department_type)
 SELECT 
     department_id,
@@ -437,10 +102,51 @@ SELECT
         WHEN department_name LIKE '%Surgical%' THEN 'Surgical'
         ELSE 'Other'
     END AS department_type
-FROM departments;
+FROM departments
+ON DUPLICATE KEY UPDATE
+    department_name = VALUES(department_name),
+    floor = VALUES(floor),
+    capacity = VALUES(capacity),
+    department_type = VALUES(department_type);
 
--- Load dim_patient from OLTP with age calculations
-INSERT INTO dim_patient (patient_id, mrn, first_name, last_name, full_name, date_of_birth, age, age_group, gender, is_current)
+-- -----------------------------------------------------
+-- dim_patient: SCD Type 2 (History Tracking)
+-- Strategy:
+--   1. Detect changed records (name, gender changed)
+--   2. Expire old versions (is_current = FALSE)
+--   3. Insert new versions (is_current = TRUE)
+--   4. Insert brand new patients
+-- -----------------------------------------------------
+
+-- Step 1: Create temp table to identify CHANGED patients
+DROP TEMPORARY TABLE IF EXISTS temp_patient_changes;
+CREATE TEMPORARY TABLE temp_patient_changes AS
+SELECT 
+    p.patient_id,
+    p.mrn,
+    p.first_name,
+    p.last_name,
+    p.date_of_birth,
+    p.gender,
+    d.patient_key AS existing_key
+FROM patients p
+INNER JOIN dim_patient d ON p.patient_id = d.patient_id AND d.is_current = TRUE
+WHERE 
+    p.first_name != d.first_name 
+    OR p.last_name != d.last_name 
+    OR p.gender != d.gender
+    OR p.date_of_birth != d.date_of_birth;
+
+-- Step 2: Expire old records for changed patients
+UPDATE dim_patient
+SET 
+    is_current = FALSE,
+    expiration_date = CURDATE()
+WHERE patient_id IN (SELECT patient_id FROM temp_patient_changes)
+  AND is_current = TRUE;
+
+-- Step 3: Insert new versions for changed patients
+INSERT INTO dim_patient (patient_id, mrn, first_name, last_name, full_name, date_of_birth, age, age_group, gender, effective_date, expiration_date, is_current)
 SELECT 
     patient_id,
     mrn,
@@ -457,11 +163,72 @@ SELECT
         ELSE '75+'
     END AS age_group,
     gender,
+    CURDATE() AS effective_date,
+    '9999-12-31' AS expiration_date,
     TRUE AS is_current
-FROM patients;
+FROM temp_patient_changes;
 
--- Load dim_provider with DENORMALIZED specialty and department
-INSERT INTO dim_provider (provider_id, first_name, last_name, full_name, credential, specialty_id, specialty_name, specialty_code, department_id, department_name, is_current)
+-- Step 4: Insert brand NEW patients (not in dimension at all)
+INSERT INTO dim_patient (patient_id, mrn, first_name, last_name, full_name, date_of_birth, age, age_group, gender, effective_date, expiration_date, is_current)
+SELECT 
+    p.patient_id,
+    p.mrn,
+    p.first_name,
+    p.last_name,
+    CONCAT(p.first_name, ' ', p.last_name) AS full_name,
+    p.date_of_birth,
+    TIMESTAMPDIFF(YEAR, p.date_of_birth, CURDATE()) AS age,
+    CASE 
+        WHEN TIMESTAMPDIFF(YEAR, p.date_of_birth, CURDATE()) < 18 THEN '0-17'
+        WHEN TIMESTAMPDIFF(YEAR, p.date_of_birth, CURDATE()) BETWEEN 18 AND 34 THEN '18-34'
+        WHEN TIMESTAMPDIFF(YEAR, p.date_of_birth, CURDATE()) BETWEEN 35 AND 54 THEN '35-54'
+        WHEN TIMESTAMPDIFF(YEAR, p.date_of_birth, CURDATE()) BETWEEN 55 AND 74 THEN '55-74'
+        ELSE '75+'
+    END AS age_group,
+    p.gender,
+    CURDATE() AS effective_date,
+    '9999-12-31' AS expiration_date,
+    TRUE AS is_current
+FROM patients p
+LEFT JOIN dim_patient d ON p.patient_id = d.patient_id
+WHERE d.patient_id IS NULL;
+
+DROP TEMPORARY TABLE IF EXISTS temp_patient_changes;
+
+-- -----------------------------------------------------
+-- dim_provider: SCD Type 2 (History Tracking)
+-- Strategy: Same as patient - track specialty/department changes
+-- -----------------------------------------------------
+
+-- Step 1: Identify CHANGED providers
+DROP TEMPORARY TABLE IF EXISTS temp_provider_changes;
+CREATE TEMPORARY TABLE temp_provider_changes AS
+SELECT 
+    p.provider_id,
+    p.first_name,
+    p.last_name,
+    p.credential,
+    p.specialty_id,
+    p.department_id,
+    d.provider_key AS existing_key
+FROM providers p
+INNER JOIN dim_provider d ON p.provider_id = d.provider_id AND d.is_current = TRUE
+WHERE 
+    p.first_name != d.first_name 
+    OR p.last_name != d.last_name 
+    OR p.specialty_id != d.specialty_id
+    OR p.department_id != d.department_id;
+
+-- Step 2: Expire old records
+UPDATE dim_provider
+SET 
+    is_current = FALSE,
+    expiration_date = CURDATE()
+WHERE provider_id IN (SELECT provider_id FROM temp_provider_changes)
+  AND is_current = TRUE;
+
+-- Step 3: Insert new versions for changed providers
+INSERT INTO dim_provider (provider_id, first_name, last_name, full_name, credential, specialty_id, department_id, effective_date, expiration_date, is_current)
 SELECT 
     p.provider_id,
     p.first_name,
@@ -469,32 +236,64 @@ SELECT
     CONCAT(p.first_name, ' ', p.last_name) AS full_name,
     p.credential,
     p.specialty_id,
-    s.specialty_name,
-    s.specialty_code,
     p.department_id,
-    d.department_name,
+    CURDATE() AS effective_date,
+    '9999-12-31' AS expiration_date,
+    TRUE AS is_current
+FROM temp_provider_changes p;
+
+-- Step 4: Insert brand NEW providers
+INSERT INTO dim_provider (provider_id, first_name, last_name, full_name, credential, specialty_id, department_id, effective_date, expiration_date, is_current)
+SELECT 
+    p.provider_id,
+    p.first_name,
+    p.last_name,
+    CONCAT(p.first_name, ' ', p.last_name) AS full_name,
+    p.credential,
+    p.specialty_id,
+    p.department_id,
+    CURDATE() AS effective_date,
+    '9999-12-31' AS expiration_date,
     TRUE AS is_current
 FROM providers p
-LEFT JOIN specialties s ON p.specialty_id = s.specialty_id
-LEFT JOIN departments d ON p.department_id = d.department_id;
+LEFT JOIN dim_provider d ON p.provider_id = d.provider_id
+WHERE d.provider_id IS NULL;
 
--- Load dim_encounter_type (static values)
+DROP TEMPORARY TABLE IF EXISTS temp_provider_changes;
+
+-- -----------------------------------------------------
+-- dim_encounter_type: Upsert (Static dimension)
+-- -----------------------------------------------------
+
 INSERT INTO dim_encounter_type (encounter_type, encounter_type_category, expected_los_days)
 VALUES 
     ('Outpatient', 'Ambulatory', 0),
     ('Inpatient', 'Acute', 5),
-    ('ER', 'Emergency', 1);
+    ('ER', 'Emergency', 1)
+ON DUPLICATE KEY UPDATE
+    encounter_type_category = VALUES(encounter_type_category),
+    expected_los_days = VALUES(expected_los_days);
 
--- Load dim_diagnosis from OLTP
+-- -----------------------------------------------------
+-- dim_diagnosis: Upsert (SCD Type 1)
+-- -----------------------------------------------------
+
 INSERT INTO dim_diagnosis (diagnosis_id, icd10_code, icd10_description, icd10_category)
 SELECT 
     diagnosis_id,
     icd10_code,
     icd10_description,
     SUBSTRING(icd10_code, 1, 1) AS icd10_category
-FROM diagnoses;
+FROM diagnoses
+ON DUPLICATE KEY UPDATE
+    icd10_code = VALUES(icd10_code),
+    icd10_description = VALUES(icd10_description),
+    icd10_category = VALUES(icd10_category);
 
--- Load dim_procedure from OLTP
+-- -----------------------------------------------------
+-- dim_procedure: Upsert (SCD Type 1)
+-- -----------------------------------------------------
+
 INSERT INTO dim_procedure (procedure_id, cpt_code, cpt_description, procedure_category)
 SELECT 
     procedure_id,
@@ -507,28 +306,33 @@ SELECT
         WHEN cpt_code LIKE '8%' THEN 'Laboratory'
         ELSE 'Procedure'
     END AS procedure_category
-FROM procedures;
+FROM procedures
+ON DUPLICATE KEY UPDATE
+    cpt_code = VALUES(cpt_code),
+    cpt_description = VALUES(cpt_description),
+    procedure_category = VALUES(procedure_category);
 
--- Commit dimension loads
 COMMIT;
 
--- Update ETL log
+-- Update dimension ETL log
 UPDATE etl_log 
 SET end_time = NOW(), 
     status = 'SUCCESS',
-    rows_affected = (SELECT COUNT(*) FROM dim_date) + (SELECT COUNT(*) FROM dim_patient)
-WHERE etl_step = 'load_dimensions' 
-  AND end_time IS NULL;
+    rows_affected = (SELECT COUNT(*) FROM dim_patient WHERE is_current = TRUE)
+WHERE log_id = @dim_log_id;
 
 -- =====================================================
--- SECTION 3: FACT TABLE LOAD WITH TRANSACTION
+-- SECTION 2: FACT TABLE INCREMENTAL LOAD
+-- Strategy: Only load encounters AFTER the high watermark
+--           OR encounters not yet in fact table
 -- =====================================================
 
 START TRANSACTION;
 
--- Log fact load start
-INSERT INTO etl_log (etl_step, status) VALUES ('load_fact_encounters', 'RUNNING');
+INSERT INTO etl_log (etl_step, status) VALUES ('load_fact_incremental', 'RUNNING');
+SET @fact_log_id = LAST_INSERT_ID();
 
+-- Incremental Fact Load: Only NEW encounters
 INSERT INTO fact_encounters (
     date_key, patient_key, provider_key, specialty_key, department_key, encounter_type_key,
     encounter_id, patient_id, provider_id,
@@ -555,6 +359,11 @@ SELECT
     b.allowed_amount AS total_allowed_amount,
     CASE WHEN b.billing_id IS NOT NULL THEN TRUE ELSE FALSE END AS has_billing
 FROM encounters e
+-- ===========================================================
+-- INCREMENTAL FILTER: Only load NEW encounters
+-- ===========================================================
+LEFT JOIN fact_encounters existing ON e.encounter_id = existing.encounter_id
+-- ===========================================================
 INNER JOIN dim_date dd ON DATE(e.encounter_date) = dd.calendar_date
 INNER JOIN dim_patient dp ON e.patient_id = dp.patient_id AND dp.is_current = TRUE
 INNER JOIN dim_provider dpr ON e.provider_id = dpr.provider_id AND dpr.is_current = TRUE
@@ -571,78 +380,119 @@ LEFT JOIN (
     SELECT encounter_id, COUNT(*) AS cnt 
     FROM encounter_procedures 
     GROUP BY encounter_id
-) proc_cnt ON e.encounter_id = proc_cnt.encounter_id;
+) proc_cnt ON e.encounter_id = proc_cnt.encounter_id
+WHERE existing.encounter_id IS NULL  -- Not already loaded
+  AND (
+      e.encounter_date > @last_watermark  -- After last successful run
+      OR @last_watermark = '1900-01-01 00:00:00'  -- First run: load all
+  );
 
--- Compute is_readmission flag (30-day readmission)
+-- Store count of newly loaded records
+SET @new_fact_count = ROW_COUNT();
+
+-- Compute is_readmission flag for ALL encounters (including newly loaded)
+-- A new encounter might trigger readmission for a previous one
 SET SQL_SAFE_UPDATES = 0;
 
+-- Create temp table for affected patients
+CREATE TEMPORARY TABLE temp_affected_patients AS
+SELECT DISTINCT patient_id FROM fact_encounters WHERE created_date >= @etl_start_time;
+
+-- Reset readmission flags for patients affected by new loads
 UPDATE fact_encounters fe
-INNER JOIN (
-    SELECT DISTINCT f1.encounter_key
-    FROM fact_encounters f1
-    INNER JOIN fact_encounters f2 
-        ON f1.patient_id = f2.patient_id
-        AND f1.encounter_datetime > f2.discharge_datetime
-        AND DATEDIFF(f1.encounter_datetime, f2.discharge_datetime) <= 30
-    INNER JOIN dim_encounter_type det1 ON f1.encounter_type_key = det1.encounter_type_key
-    INNER JOIN dim_encounter_type det2 ON f2.encounter_type_key = det2.encounter_type_key
-    WHERE det1.encounter_type = 'Inpatient' AND det2.encounter_type = 'Inpatient'
-) readmissions ON fe.encounter_key = readmissions.encounter_key
+SET fe.is_readmission = FALSE
+WHERE fe.patient_id IN (SELECT patient_id FROM temp_affected_patients);
+
+-- Create temp table for readmissions
+CREATE TEMPORARY TABLE temp_readmissions AS
+SELECT DISTINCT f1.encounter_key
+FROM fact_encounters f1
+INNER JOIN fact_encounters f2 
+    ON f1.patient_id = f2.patient_id
+    AND f1.encounter_datetime > f2.discharge_datetime
+    AND DATEDIFF(f1.encounter_datetime, f2.discharge_datetime) <= 30
+INNER JOIN dim_encounter_type det1 ON f1.encounter_type_key = det1.encounter_type_key
+INNER JOIN dim_encounter_type det2 ON f2.encounter_type_key = det2.encounter_type_key
+WHERE det1.encounter_type = 'Inpatient' 
+  AND det2.encounter_type = 'Inpatient'
+  AND f1.patient_id IN (SELECT patient_id FROM temp_affected_patients);
+
+-- Recompute readmissions for affected patients
+UPDATE fact_encounters fe
+INNER JOIN temp_readmissions tr ON fe.encounter_key = tr.encounter_key
 SET fe.is_readmission = TRUE;
+
+-- Drop temp tables
+DROP TEMPORARY TABLE temp_readmissions;
+DROP TEMPORARY TABLE temp_affected_patients;
 
 SET SQL_SAFE_UPDATES = 1;
 
--- Commit fact table load
 COMMIT;
 
--- Update ETL log
+-- Update fact ETL log
 UPDATE etl_log 
 SET end_time = NOW(), 
     status = 'SUCCESS',
-    rows_affected = (SELECT COUNT(*) FROM fact_encounters)
-WHERE etl_step = 'load_fact_encounters' 
-  AND end_time IS NULL;
+    rows_affected = @new_fact_count
+WHERE log_id = @fact_log_id;
 
 -- =====================================================
--- SECTION 4: BRIDGE TABLE LOAD WITH TRANSACTION
+-- SECTION 3: BRIDGE TABLE INCREMENTAL LOAD
+-- Strategy: Only load bridges for newly inserted facts
 -- =====================================================
 
 START TRANSACTION;
 
--- Log bridge load start
-INSERT INTO etl_log (etl_step, status) VALUES ('load_bridge_tables', 'RUNNING');
+INSERT INTO etl_log (etl_step, status) VALUES ('load_bridge_incremental', 'RUNNING');
+SET @bridge_log_id = LAST_INSERT_ID();
 
--- Load bridge_encounter_diagnoses
-INSERT INTO bridge_encounter_diagnoses (encounter_key, diagnosis_key, diagnosis_sequence, diagnosis_date)
+-- Load bridge_encounter_diagnoses (Only for new facts)
+INSERT IGNORE INTO bridge_encounter_diagnoses (encounter_key, diagnosis_key, diagnosis_sequence, diagnosis_date)
 SELECT 
     f.encounter_key,
     dd.diagnosis_key,
+    ed.diagnosis_sequence,
+    DATE(f.encounter_datetime) AS diagnosis_date
+FROM encounter_diagnoses ed
+INNER JOIN fact_encounters f ON ed.encounter_id = f.encounter_id
+INNER JOIN dim_diagnosis dd ON ed.diagnosis_id = dd.diagnosis_id
+WHERE f.created_date >= @etl_start_time;  -- Only new facts
 
--- Commit bridge table loads
+-- Load bridge_encounter_procedures (Only for new facts)
+INSERT IGNORE INTO bridge_encounter_procedures (encounter_key, procedure_key, procedure_sequence, procedure_date)
+SELECT 
+    f.encounter_key,
+    dp.procedure_key,
+    ROW_NUMBER() OVER (PARTITION BY ep.encounter_id ORDER BY ep.procedure_date) AS procedure_sequence,
+    ep.procedure_date
+FROM encounter_procedures ep
+INNER JOIN fact_encounters f ON ep.encounter_id = f.encounter_id
+INNER JOIN dim_procedure dp ON ep.procedure_id = dp.procedure_id
+WHERE f.created_date >= @etl_start_time;  -- Only new facts
+
 COMMIT;
 
--- Update ETL log
+-- Update bridge ETL log
 UPDATE etl_log 
 SET end_time = NOW(), 
     status = 'SUCCESS',
-    rows_affected = (SELECT COUNT(*) FROM bridge_encounter_diagnoses) + 
-                   (SELECT COUNT(*) FROM bridge_encounter_procedures)
-WHERE etl_step = 'load_bridge_tables' 
-  AND end_time IS NULL;
+    rows_affected = (SELECT COUNT(*) FROM bridge_encounter_diagnoses WHERE diagnosis_date >= DATE(@etl_start_time))
+WHERE log_id = @bridge_log_id;
 
 -- =====================================================
--- SECTION 5: POST-ETL DATA RECONCILIATION
+-- SECTION 4: POST-ETL RECONCILIATION & METADATA UPDATE
 -- =====================================================
 
 -- Run reconciliation checks
 CALL reconcile_etl_data();
 
--- Update ETL metadata
+-- Update ETL Metadata with NEW High Watermark
 INSERT INTO etl_metadata (table_name, last_etl_timestamp, last_etl_status, rows_processed)
 VALUES 
-    ('fact_encounters', NOW(), 'SUCCESS', (SELECT COUNT(*) FROM fact_encounters)),
-    ('dim_patient', NOW(), 'SUCCESS', (SELECT COUNT(*) FROM dim_patient)),
-    ('dim_provider', NOW(), 'SUCCESS', (SELECT COUNT(*) FROM dim_provider))
+    ('fact_encounters', NOW(), 'SUCCESS', @new_fact_count),
+    ('dim_patient', NOW(), 'SUCCESS', (SELECT COUNT(*) FROM dim_patient WHERE is_current = TRUE)),
+    ('dim_provider', NOW(), 'SUCCESS', (SELECT COUNT(*) FROM dim_provider WHERE is_current = TRUE))
 ON DUPLICATE KEY UPDATE
     last_etl_timestamp = NOW(),
     last_etl_status = 'SUCCESS',
@@ -651,31 +501,24 @@ ON DUPLICATE KEY UPDATE
 -- Complete main ETL log entry
 UPDATE etl_log 
 SET end_time = NOW(), 
-    status = 'SUCCESS'
-WHERE log_id = @log_id;
+    status = 'SUCCESS',
+    rows_affected = @new_fact_count
+WHERE log_id = @batch_log_id;
 
--- Display ETL summary
+-- =====================================================
+-- SECTION 5: ETL SUMMARY REPORT
+-- =====================================================
+
 SELECT 
-    'ETL COMPLETED SUCCESSFULLY' AS status,
+    'INCREMENTAL ETL COMPLETED' AS status,
+    @last_watermark AS previous_watermark,
+    NOW() AS new_watermark,
+    @new_fact_count AS new_encounters_loaded,
     (SELECT COUNT(*) FROM fact_encounters) AS total_encounters,
     (SELECT COUNT(*) FROM dim_patient WHERE is_current = TRUE) AS active_patients,
+    (SELECT COUNT(*) FROM dim_patient WHERE is_current = FALSE) AS historical_patient_versions,
     (SELECT COUNT(*) FROM dim_provider WHERE is_current = TRUE) AS active_providers,
     (SELECT SUM(total_allowed_amount) FROM fact_encounters) AS total_revenue,
     (SELECT COUNT(*) FROM fact_encounters WHERE is_readmission = TRUE) AS total_readmissions,
-    TIMEDIFF(NOW(), @etl_start_time) AS execution_time;    ed.diagnosis_sequence,
-    DATE(f.encounter_datetime) AS diagnosis_date
-FROM encounter_diagnoses ed
-INNER JOIN fact_encounters f ON ed.encounter_id = f.encounter_id
-INNER JOIN dim_diagnosis dd ON ed.diagnosis_id = dd.diagnosis_id;
-
--- Load bridge_encounter_procedures
-INSERT INTO bridge_encounter_procedures (encounter_key, procedure_key, procedure_sequence, procedure_date)
-SELECT 
-    f.encounter_key,
-    dp.procedure_key,
-    ROW_NUMBER() OVER (PARTITION BY ep.encounter_id ORDER BY ep.procedure_date) AS procedure_sequence,
-    ep.procedure_date
-FROM encounter_procedures ep
-INNER JOIN fact_encounters f ON ep.encounter_id = f.encounter_id
-INNER JOIN dim_procedure dp ON ep.procedure_id = dp.procedure_id;
+    TIMEDIFF(NOW(), @etl_start_time) AS execution_time;
 
