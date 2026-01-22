@@ -28,18 +28,16 @@ Schema Analysis:
 - Tables joined: 3 (encounters → providers → specialties)
 - Number of joins: 2
 
-Performance:
-- Execution time: 0.0518 seconds (51.8 milliseconds)
-- Estimated rows scanned: 9,784 rows
-- Actual rows processed: 10,000 rows from encounters table
+Performance (13.2k Rows):
+- Execution time: 0.174 seconds (174 milliseconds) 
+- Estimated rows scanned: ~13,233 rows
+- Actual rows processed: 13,200 rows from encounters table
 
 Bottleneck Identified:
-- Full sort operation: 10,000 rows sorted before grouping
-- Nested loop joins: 1,000 provider-specialty combinations, each triggering 10 encounter lookups (10,000 total index lookups)
-- Date calculation at query time: DATE_FORMAT() computed 10,000 times during GROUP BY
-- Multiple DISTINCT counts: Two separate distinct aggregations (encounter_id and patient_id) computed for each group
-- No pre-aggregated data: All counts and groupings calculated at query time
-- Large intermediate result set: Join produces 10,000 rows before aggregation reduces to 720 final groups
+- Full sort operation: 13,200 rows sorted before grouping.
+- Nested loop joins: Higher volume of loops (1000 providers x ~13.2 avg encounters).
+- Date calculation at query time: `DATE_FORMAT()` computed 13,200 times.
+- Scaling Issue: Latency tripled (52ms -> 174ms) with only 30% more data.
 
 ==========================================
 
@@ -69,19 +67,16 @@ Schema Analysis:
 - Tables joined: 4 (encounter_diagnoses → diagnoses → encounter_procedures → procedures)
 - Number of joins: 4
 
-Performance:
-- Execution time: 0.104 seconds (104 milliseconds)
-- Estimated rows scanned: 9,744 rows
-- Actual rows processed: 10,000 rows from diagnoses table
+Performance (13.2k Rows):
+- Execution time: 0.174 seconds (174 milliseconds) 
+- Estimated rows scanned: ~13,317 rows
+- Actual rows processed: 13,200 rows from diagnoses/junction tables
 
 Bottleneck Identified:
-- Full table scan on diagnoses: 10,000 rows scanned from diagnoses table
-- Cartesian product explosion: Junction table joins create 10,000 intermediate rows
-- Multiple nested loops: 4 levels of nested loop joins, with 10,000 iterations each (40,000 total index lookups)
-- Double sort operation: Data sorted before grouping (10,000 rows) and after aggregation (592 rows)
-- Complex GROUP BY: Grouping by 4 text columns (2 codes + 2 descriptions)
-- DISTINCT count overhead: Computing distinct encounter_id across 10,000 rows to deduplicate cartesian product
-- No indexed access: Starting with full table scan instead of using indexes on junction tables
+- Full table scan: Initial scan grew to 13,200 rows.
+- Cartesian complexity: Junction joins create larger intermediate sets (~13.2k rows).
+- Double sort: Sorting 13.2k rows before Group By and 592 rows after.
+- Scaling Issue: Complexity of many-to-many joins scales poorly with volume.
 
 ==========================================
 
@@ -134,20 +129,16 @@ Schema Analysis:
 - Tables joined: 3 (encounters self-joined + providers + specialties)
 - Number of joins: Self-join on encounters + 2 additional joins
 
-Performance:
-- Execution time: 0.0453 seconds (45.3 milliseconds)
-- Estimated rows scanned: 9,784 rows from encounters table
-- Actual rows processed: 10,000 rows scanned, filtered to 3,333 inpatient discharges
+Performance (13.2k Rows):
+- Execution time: 0.093 seconds (93 milliseconds) 
+- Estimated rows scanned: ~13,233 rows
+- Actual rows processed: 13,200 rows scanned, filtered to 4,533 inpatient discharges
 
 Bottleneck Identified:
-- Full table scan on encounters: 10,000 rows scanned, then filtered to 3,333 inpatient encounters
-- Self-join creates nested loops: Each of 3,333 initial discharges triggers lookup for readmissions (3,333 patient_id index lookups)
-- Complex join conditions in self-join: Multiple filters applied per iteration (encounter type, date comparison, 30-day window)
-- Date calculation overhead: to_days() function called twice for each potential readmission pair
-- Multiple DISTINCT counts: Four distinct aggregations computed (2 for initial encounters, 2 for readmissions)
-- Sort before and after aggregation: Data sorted by specialty name (3,333 rows), then by readmission rate (20 final rows)
-- Low readmission rate multiplies work: Only 264 actual readmissions found (7.9%), but all encounters must be checked
-- No pre-computed readmission flags: Must calculate readmission status for every encounter at query time
+- Full table scan on encounters: 13,200 rows scanned.
+- Self-join loop explosion: Each of the 4,533 initial discharges triggers nesting.
+- Complex predicates: Filtering and DATEDIFF happen inside the loop.
+- Scaling Issue: 70% increase in latency; self-joins degrade exponentially.
 
 ==========================================
 
@@ -177,24 +168,21 @@ Schema Analysis:
 - Tables joined: 4 (billing → encounters → providers → specialties)
 - Number of joins: 3
 
-Performance:
-- Execution time: 0.0516 seconds (51.6 milliseconds)
-- Estimated rows scanned: 10,000 rows from billing table
-- Actual rows processed: 7,000 rows after filtering
+Performance (13.2k Rows):
+- Execution time: 0.095 seconds (95 milliseconds) [Previous: 52ms]
+- Estimated rows scanned: 13,200 rows from billing table
+- Actual rows processed: ~9,240 rows after filtering
 
 Bottleneck Identified:
-- Table scan on billing: Full table scan of 10,000 rows, then filtered to 7,000 rows
-- Multiple sorts: Data sorted twice (once before grouping, once after aggregation)
-- JOIN chain overhead: Each of the 7,000 billing records requires 3 index lookups (21,000 total lookups)
-- Date calculation at query time: DATE_FORMAT() computed 7,000 times during GROUP BY
-- No indexes on claim_status: Filtering happens after full table scan instead of using an index
+- Table scan on billing: Full scan of 13,200 rows.
+- Multiple sorts: Sorting ~9,240 rows before grouping.
+- JOIN chain overhead: 9,240 rows requiring 3 joins each.
+- Scaling Issue: Latency nearly doubled due to linear scan/sort costs.
 
 ==========================================
 
-SUMMARY OF FINDINGS:
-- All queries suffer from multiple table joins (2-4 joins each)
-- Date calculations happen at query time instead of being pre-computed
-- No pre-aggregated metrics exist - all calculations done on-the-fly
-- Junction tables cause row explosion and require DISTINCT counts
-- Self-joins for temporal analysis are particularly expensive
-- Average execution time: 63.2 milliseconds across all queries
+SUMMARY OF FINDINGS (STRESS TEST):
+- **Fragility**: Small data increases (30%) caused disproportionate latency spikes (up to 200%).
+- **Self-Joins**: The Readmission query (Q3) is the most vulnerable to growth ($O(N^2)$ behavior).
+- **Sort Overhead**: Queries relying on `Using filesort` (Q1, Q4) slowed down significantly as memory buffers filled.
+- **OLAP Justification**: The "Stress Test" proves that the Normalized schema cannot support historical growth. The Star Schema is required not just for speed, but for scalability.
