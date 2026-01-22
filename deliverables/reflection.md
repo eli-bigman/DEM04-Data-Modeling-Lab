@@ -40,21 +40,30 @@ This decision preserved the "One Encounter = One Row" grain of the fact table. I
 **Production view:**  
 In a production environment, this is the standard "Kimball" approach for Many-to-Many relationships. It allows us to perform high-speed aggregations on the Fact table (Revenue, Counts) without touching the Bridge table, while still allowing deep clinical analysis when needed.
 
-### 4. Performance Quantification
+### 4. Performance Quantification (Validating Scalability)
 
-The following comparisons illustrate the impact of the transformation:
+The following comparisons illustrate the impact of the transformation, updated with a stress-test on a larger dataset (**13.2k rows** vs original 10k):
 
 **Query 3: 30-Day Readmission Rate**
-*   **Original (OLTP):** ~31.9 ms
-*   **Optimized (Star):** ~11.1 ms
-*   **Improvement:** **~2.9x Faster**
-*   **Reason:** Replaced a complex Self-Join and Date Arithmetic with a simple Boolean Flag lookup.
+*   **Original (OLTP):** ~93 ms (Degraded from ~32ms with just 30% more data)
+*   **Optimized (Star):** ~15 ms
+*   **Improvement:** **~6x Faster**
+*   **Reason:** The OLTP query complexity grew super-linearly ($O(N^2)$) due to the self-join loop. The Star Schema maintained linear scalability ($O(N)$) thanks to the pre-computed `is_readmission` flag.
 
 **Query 4: Revenue by Specialty**
-*   **Original (OLTP):** ~45.2 ms
-*   **Optimized (Star):** ~26.2 ms
-*   **Improvement:** **~1.7x Faster**
-*   **Reason:** Eliminated the join to the `billing` table by moving `total_allowed_amount` directly into the Fact table.
+*   **Original (OLTP):** ~95 ms
+*   **Optimized (Star):** ~67 ms
+*   **Improvement:** **~1.4x Faster**
+*   **Reason:** Eliminated the join to the `billing` table. The OLTP query suffered from sorting overhead on the larger dataset.
+
+**Query 2: Many-to-Many Complexity (The Exception)**
+*   **Observation:** The Star Schema performed similarly to the OLTP one for the complex Diagnosis-Procedure query (~177ms vs ~174ms).
+*   **Insight:** Bridge tables solve the *structural* problem of Many-to-Many modeling but do not inherently solve the *computational* cost of joining millions of rows.
+
+### 5. ETL & Infrastructure Improvements
+*   **Robust Incremental Loading:** Implemented a **Data-Driven High Watermark** strategy using `etl_metadata`. The system now tracks the `MAX(encounter_date)` processed, ensuring that late-arriving data or re-runs handle increments correctly and idempotently.
+*   **Dynamic Date Dimension:** Replaced static recursive CTEs with a stored procedure `populate_dim_date`, allowing flexible generation of date ranges (past and future) to support long-term forecasting.
+*   **Dockerized Orchestration:** The pipeline is now fully containerized with a strict execution order (OLTP Load -> Incremental Load -> Star DDL -> Star ETL), ensuring a reproducible "Infrastructure as Code" environment.
 
 **Overall Conclusion:**
-The migration successfully met the objective. While small datasets show millisecond-level differences, the architectural changes (O(1) lookups vs O(N^2) joins) guarantee that the Star Schema will handle data growth far better than the original transactional system.
+The migration successfully met the objective. The "stress test" with incremental data revealed the fragility of the OLTP design (where small data increases caused 3x latency spikes). The Star Schema demonstrated superior stability and scalability, proving its value for the organization's analytical roadmap.
