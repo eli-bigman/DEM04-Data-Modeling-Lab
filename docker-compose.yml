@@ -12,9 +12,11 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
       - ./data/generated_10k_sample_data.sql:/docker-entrypoint-initdb.d/01-oltp.sql
-      - ./deliverables/star_schema.sql:/docker-entrypoint-initdb.d/02-star.sql
+      - ./data/generate_increment_3k_data.sql:/docker-entrypoint-initdb.d/02-oltp-increment.sql
+      - ./deliverables/DDL_star_shema.sql:/docker-entrypoint-initdb.d/03-star-ddl.sql
+      - ./deliverables/star_schema.sql:/docker-entrypoint-initdb.d/04-star-etl.sql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-password}"]
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-password}" ]
       interval: 10s
       timeout: 5s
       retries: 5
