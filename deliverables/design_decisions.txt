@@ -131,6 +131,28 @@ The following dimension tables will be created:
    
    Why: Small dimension (3-5 rows) but important for filtering and grouping
 
+7. DIM_DIAGNOSIS
+   Purpose: Medical diagnosis codes for clinical analysis
+   Attributes:
+   - diagnosis_key (PK, surrogate key) -- PRIMARY KEY (clustered index for joins)
+   - diagnosis_id (natural key from source) -- INDEX (lookup from source system)
+   - icd10_code (ICD-10 diagnosis code) -- INDEX (clinical lookups)
+   - icd10_description (human-readable description)
+   - icd10_category (first character of ICD-10, e.g., 'I' for circulatory)
+   
+   Why: Enables diagnosis-based analysis; linked via bridge table for M:M relationship
+
+8. DIM_PROCEDURE
+   Purpose: Medical procedure codes for clinical and billing analysis
+   Attributes:
+   - procedure_key (PK, surrogate key) -- PRIMARY KEY (clustered index for joins)
+   - procedure_id (natural key from source) -- INDEX (lookup from source system)
+   - cpt_code (CPT procedure code) -- INDEX (billing lookups)
+   - cpt_description (human-readable description)
+   - procedure_category (E&M, Radiology, Laboratory, etc.)
+   
+   Why: Enables procedure-based analysis; linked via bridge table for M:M relationship
+
 DESIGN PATTERN: CONFORMED DIMENSIONS
 - dim_date, dim_patient, dim_provider are conformed dimensions
 - Can be shared across multiple fact tables (future expansion)
@@ -285,9 +307,9 @@ SUMMARY OF DESIGN CHOICES
 --------------------------
 
 Grain: One row per encounter (matches business process)
-Dimensions: 6 core dimensions with denormalized attributes
-Pre-aggregation: 7 key metrics computed during ETL
-Bridge Tables: Yes, for diagnoses and procedures
+Dimensions: 8 dimensions (date, patient, provider, specialty, department, encounter_type, diagnosis, procedure)
+Pre-aggregation: 7 key metrics computed during ETL (diagnosis_count, procedure_count, total_claim_amount, total_allowed_amount, length_of_stay_days, is_readmission, has_billing)
+Bridge Tables: 2 bridges for many-to-many relationships (diagnoses and procedures)
 
 Expected Performance Improvement:
 - Query 1: 3-5x faster (no date functions, direct specialty access)
