@@ -48,13 +48,19 @@ The optimized analytical database using dimensional modeling:
 
 **Fact Table**: `fact_encounters` (grain: one row per patient encounter)
 
-**Dimension Tables**: 
-- `dim_patient` - Patient demographics
-- `dim_provider` - Provider information with specialty
-- `dim_department` - Department details
-- `dim_date` - Pre-computed date attributes for fast filtering
+**Dimension Tables (8 total)**: 
+- `dim_date` - Pre-computed calendar attributes (year, month, quarter, day_name, is_weekend)
+- `dim_patient` - Patient demographics with pre-computed age groups
+- `dim_provider` - Provider info with denormalized specialty and department
+- `dim_specialty` - Medical specialty lookup with categories
+- `dim_department` - Department details with type classification
+- `dim_encounter_type` - Encounter types (Outpatient, Inpatient, ER)
+- `dim_diagnosis` - ICD-10 codes with descriptions and categories
+- `dim_procedure` - CPT codes with descriptions and categories
 
-**Bridge Table**: `bridge_encounter_diagnosis` - Handles many-to-many relationship between encounters and diagnoses
+**Bridge Tables (2 total)**: 
+- `bridge_encounter_diagnoses` - Many-to-many: encounters ↔ diagnoses
+- `bridge_encounter_procedures` - Many-to-many: encounters ↔ procedures
 
 **Characteristics**:
 - ✅ Denormalized for fast reads
@@ -276,9 +282,11 @@ docker-compose up -d --build
 
 ### Design Decisions
 - **Fact Grain**: One row per encounter (not per procedure or diagnosis)
-- **Bridge Table**: Handles many-to-many encounter-diagnosis relationship
-- **SCD Type 1**: Dimensions use simple overwrite (no historical tracking needed for this use case)
-- **Date Dimension**: Includes year, month, quarter for fast time-series analysis
+- **8 Dimensions**: Date, Patient, Provider, Specialty, Department, Encounter Type, Diagnosis, Procedure
+- **2 Bridge Tables**: Handle many-to-many relationships for diagnoses and procedures
+- **SCD Type 2 Ready**: Patient and Provider dimensions include effective_date, expiration_date, is_current
+- **Pre-computed Metrics**: 7 metrics calculated during ETL (diagnosis_count, is_readmission, etc.)
+- **Date Dimension**: Includes year, month, quarter, day_name, is_weekend for fast time-series analysis
 
 ### Trade-offs
 - **Storage**: Star schema uses more space due to denormalization (~20-30% increase)
