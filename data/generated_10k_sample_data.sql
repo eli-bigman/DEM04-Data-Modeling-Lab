@@ -11,7 +11,7 @@
 CREATE DATABASE IF NOT EXISTS healthcare_analytics_lab;
 USE healthcare_analytics_lab;
 
--- Drop tables in reverse dependency order
+-- Drop tables in reverse dependency order (!not done in production!)
 DROP TABLE IF EXISTS encounter_procedures;
 DROP TABLE IF EXISTS encounter_diagnoses;
 DROP TABLE IF EXISTS billing;
@@ -541,7 +541,7 @@ SELECT n AS procedure_id,
         ELSE CONCAT('Medical Procedure ', n)
     END AS cpt_description
 FROM numbers;
--- Generate 10,000 Encounters
+-- Generate 10,000 Encounters (Deterministic dates to guarantee discharge > encounter)
 INSERT INTO encounters (
         encounter_id,
         patient_id,
@@ -550,39 +550,46 @@ INSERT INTO encounters (
         encounter_date,
         discharge_date,
         department_id
-    ) WITH RECURSIVE numbers AS (
-        SELECT 1 AS n
-        UNION ALL
-        SELECT n + 1
-        FROM numbers
-        WHERE n < 10000
-    )
-SELECT n AS encounter_id,
+    ) 
+WITH RECURSIVE numbers AS (
+    SELECT 1 AS n
+    UNION ALL
+    SELECT n + 1
+    FROM numbers
+    WHERE n < 10000
+),
+base_encounters AS (
+    SELECT 
+        n,
+        CASE
+            WHEN n % 3 = 1 THEN 'Outpatient'
+            WHEN n % 3 = 2 THEN 'Inpatient'
+            ELSE 'ER'
+        END AS encounter_type,
+        -- Deterministic encounter_date based on n
+        DATE_ADD(
+            DATE_ADD('2024-01-01', INTERVAL (n % 365) DAY),
+            INTERVAL (n % 24) HOUR
+        ) AS encounter_date
+    FROM numbers
+)
+SELECT 
+    n AS encounter_id,
     ((n - 1) % 10000) + 1 AS patient_id,
     ((n - 1) % 1000) + 1 AS provider_id,
-    -- Fixed: Only 1000 providers exist
+    encounter_type,
+    encounter_date,
+    -- Discharge is ALWAYS after encounter_date (adds 1+ hours/days)
     CASE
-        WHEN n % 3 = 1 THEN 'Outpatient'
-        WHEN n % 3 = 2 THEN 'Inpatient'
-        ELSE 'ER'
-    END AS encounter_type,
-    DATE_ADD('2024-01-01', INTERVAL FLOOR(RAND() * 365) DAY) + INTERVAL FLOOR(RAND() * 24) HOUR AS encounter_date,
-    CASE
-        WHEN n % 3 = 1 THEN DATE_ADD(
-            DATE_ADD('2024-01-01', INTERVAL FLOOR(RAND() * 365) DAY),
-            INTERVAL FLOOR(RAND() * 4) HOUR
-        )
-        WHEN n % 3 = 2 THEN DATE_ADD(
-            DATE_ADD('2024-01-01', INTERVAL FLOOR(RAND() * 365) DAY),
-            INTERVAL FLOOR(1 + RAND() * 10) DAY
-        )
-        ELSE DATE_ADD(
-            DATE_ADD('2024-01-01', INTERVAL FLOOR(RAND() * 365) DAY),
-            INTERVAL FLOOR(RAND() * 24) HOUR
-        )
+        WHEN encounter_type = 'Outpatient' THEN 
+            DATE_ADD(encounter_date, INTERVAL ((n % 4) + 1) HOUR)
+        WHEN encounter_type = 'Inpatient' THEN 
+            DATE_ADD(encounter_date, INTERVAL ((n % 10) + 1) DAY)
+        ELSE 
+            DATE_ADD(encounter_date, INTERVAL ((n % 12) + 1) HOUR)
     END AS discharge_date,
-    ((n - 1) % 15) + 1 AS department_id -- Fixed: Only 15 departments exist
-FROM numbers;
+    ((n - 1) % 15) + 1 AS department_id
+FROM base_encounters;
 -- Generate 10,000 Billing Records
 INSERT INTO billing (
         billing_id,
@@ -650,3 +657,97 @@ FROM numbers;
 -- Data Generation Complete
 -- Each table now has 10,000 records
 -- ================================================================
+
+-- ================================================================
+-- Inject deterministic inpatient readmissions (200) and matching rows
+-- Purpose: create reproducible Inpatient -> Inpatient readmission pairs
+-- New encounter ids begin at 10001 to avoid PK collisions with the
+-- original 10,000 generated rows.
+-- ================================================================
+-- Capture the exact source encounter ids in a temporary table so
+-- downstream inserts reference the same originals (prevents FK mismatches).
+DROP TEMPORARY TABLE IF EXISTS temp_readmission_sources;
+CREATE TEMPORARY TABLE temp_readmission_sources AS
+SELECT encounter_id, patient_id, provider_id, discharge_date, department_id
+FROM encounters
+WHERE encounter_type = 'Inpatient'
+ORDER BY encounter_id
+LIMIT 200;
+
+-- Insert new readmission encounters (IDs offset by 10000 using the source id)
+INSERT INTO encounters (
+        encounter_id,
+        patient_id,
+        provider_id,
+        encounter_type,
+        encounter_date,
+        discharge_date,
+        department_id
+    )
+SELECT
+    10000 + trs.encounter_id AS encounter_id,
+    trs.patient_id,
+    ((trs.provider_id % 1000) + 1) AS provider_id,
+    'Inpatient' AS encounter_type,
+    DATE_ADD(trs.discharge_date, INTERVAL ((trs.encounter_id % 30) + 1) DAY) AS encounter_date,
+    DATE_ADD(DATE_ADD(trs.discharge_date, INTERVAL ((trs.encounter_id % 30) + 1) DAY), INTERVAL ((trs.encounter_id % 10) + 1) DAY) AS discharge_date,
+    trs.department_id
+FROM temp_readmission_sources trs;
+
+-- Add matching billing rows only for those source encounters (preserves FK)
+INSERT INTO billing (
+        billing_id,
+        encounter_id,
+        claim_amount,
+        allowed_amount,
+        claim_date,
+        claim_status
+    )
+SELECT
+    10000 + b.billing_id AS billing_id,
+    10000 + b.encounter_id AS encounter_id,
+    ROUND(500 + (RAND() * 50000), 2) AS claim_amount,
+    ROUND((500 + (RAND() * 50000)) * 0.8, 2) AS allowed_amount,
+    DATE_ADD('2024-01-01', INTERVAL (b.encounter_id % 365) DAY) AS claim_date,
+    CASE
+        WHEN b.billing_id % 10 = 1 THEN 'Pending'
+        WHEN b.billing_id % 10 = 2 THEN 'Denied'
+        WHEN b.billing_id % 10 = 3 THEN 'Under Review'
+        ELSE 'Paid'
+    END AS claim_status
+FROM billing b
+JOIN temp_readmission_sources trs ON b.encounter_id = trs.encounter_id;
+
+-- Add matching encounter_diagnoses for the new encounters (ids offset by 10000)
+INSERT INTO encounter_diagnoses (
+        encounter_diagnosis_id,
+        encounter_id,
+        diagnosis_id,
+        diagnosis_sequence
+    )
+SELECT
+    10000 + ed.encounter_diagnosis_id,
+    10000 + ed.encounter_id,
+    ed.diagnosis_id,
+    ed.diagnosis_sequence
+FROM encounter_diagnoses ed
+JOIN temp_readmission_sources trs ON ed.encounter_id = trs.encounter_id;
+
+-- Add matching encounter_procedures for the new encounters (ids offset by 10000)
+INSERT INTO encounter_procedures (
+        encounter_procedure_id,
+        encounter_id,
+        procedure_id,
+        procedure_date
+    )
+SELECT
+    10000 + ep.encounter_procedure_id,
+    10000 + ep.encounter_id,
+    ep.procedure_id,
+    DATE_ADD(ep.procedure_date, INTERVAL ((ep.encounter_procedure_id % 7) + 1) DAY)
+FROM encounter_procedures ep
+JOIN temp_readmission_sources trs ON ep.encounter_id = trs.encounter_id;
+
+-- Clean up
+DROP TEMPORARY TABLE IF EXISTS temp_readmission_sources;
+
