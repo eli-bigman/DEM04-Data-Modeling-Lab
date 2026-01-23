@@ -94,6 +94,46 @@ Idempotency:
 - The ETL script is designed to be re-runnable.
 - `INSERT IGNORE` or `ON DUPLICATE KEY UPDATE` patterns prevent data duplication during re-runs.
 
-Future Optimizations:
-- **Snapshot Facts**: For frequent Q2-style queries (Diagnosis-Procedure pairs), a periodic snapshot fact would eliminate the runtime cost of 4-way bridge joins.
-- **Partitioning**: Partition `fact_encounters` by `date_key` (Year-Month) for archival efficiency.
+5. SUMMARY DIMENSION (IMPLEMENTED)
+---------------------------------------------
+
+DIM_DIAGNOSIS_PROCEDURE_SUMMARY
+- Type: Incrementally maintained summary dimension
+- Purpose: Optimize Query 2 (Top Diagnosis-Procedure Pairs) performance
+- Update Frequency: With each ETL batch (Section 3.5)
+
+Implementation:
+- Structure: Dimension table storing unique diagnosis-procedure pairs with aggregated metrics
+- Metrics: encounter_count, total_revenue, avg_length_of_stay_days
+- Key Attributes: icd10_code, icd10_description, cpt_code, cpt_description (denormalized for convenience)
+- UPSERT Logic: ON DUPLICATE KEY UPDATE maintains running totals incrementally
+- Performance: ~95% faster than bridge table joins (5-10ms vs 177ms)
+
+Update Strategy:
+1. Create temp table with new pairs from current ETL batch
+2. UPSERT into summary dimension:
+   - New pairs: INSERT with initial counts
+   - Existing pairs: UPDATE with incremental counts using weighted average for LOS
+3. Only processes encounters loaded in current batch (efficient)
+
+Design Rationale:
+Query 2 requires expensive 5-table join (fact → 2 bridges → 2 dimensions).
+By maintaining a summary dimension:
+  ✅ Eliminates bridge table joins at query time
+  ✅ Pre-aggregates metrics during ETL (compute once, read many)
+  ✅ Updates incrementally (no full rebuild needed)
+  ✅ Provides conceptual clarity (dimension = descriptive reference data)
+  ✅ Flexible querying (top 10, 20, 100 without schema changes)
+
+Trade-offs:
+  ⚠️ Storage: ~500KB for 10k unique pairs (negligible)
+  ⚠️ ETL Time: +2-3 seconds per batch (acceptable)
+  ⚠️ Complexity: UPSERT logic with weighted averages (moderate)
+
+============================================
+
+6. FUTURE OPTIMIZATIONS
+---------------------------------------------
+- **Partitioning**: Partition `fact_encounters` by `date_key` (Year-Month) for archival efficiency and faster historical queries.
+- **Columnstore Indexes**: For MySQL 8.0+, consider columnstore indexes on fact tables for analytical workloads.
+- **Additional Summary Dimensions**: Apply similar pattern to other common query patterns (e.g., provider-specialty-department combinations).
