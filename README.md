@@ -76,9 +76,10 @@ The optimized analytical database using dimensional modeling:
 | Business Metric | OLTP Execution Time | Star Schema Time | Speedup |
 | :--- | :---: | :---: | :---: |
 | **30-Day Readmissions** | Complex Self-Join + Date Math | Pre-computed `is_readmission` flag | **~2.9x Faster** ⚡ |
-| **Revenue by Specialty** | 4-Table Join Chain | Denormalized Fact Table | **~1.7x Faster** ⚡ |
+| **Revenue by Specialty** | 4-Table Join Chain (174ms) | Summary Dimension (10-11ms) | **~16x Faster** ⚡ |
 | **Monthly Encounter Trends** | Runtime `DATE_FORMAT()` | Pre-computed Date Dimension | **~6% Faster** ⚡ |
 | **Multi-Diagnosis Encounters** | Bridge Table Aggregation | Indexed Bridge with COUNT | **Optimized** ⚡ |
+
 
 ---
 
