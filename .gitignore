@@ -19,3 +19,5 @@ venv/
 *.md
 !README.md
 .DS_Store
+
+!code review.md
