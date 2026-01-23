@@ -76,12 +76,13 @@ The optimized analytical database using dimensional modeling:
 
 ## 📊 Performance Improvements
 
-| Business Metric | OLTP Execution Time | Star Schema Time | Speedup |
-| :--- | :---: | :---: | :---: |
-| **30-Day Readmissions** | Complex Self-Join + Date Math | Pre-computed `is_readmission` flag | **~2.9x Faster** ⚡ |
-| **Revenue by Specialty** | 4-Table Join Chain (174ms) | Summary Dimension (10-11ms) | **~16x Faster** ⚡ |
-| **Monthly Encounter Trends** | Runtime `DATE_FORMAT()` | Pre-computed Date Dimension | **~6% Faster** ⚡ |
-| **Multi-Diagnosis Encounters** | Bridge Table Aggregation | Indexed Bridge with COUNT | **Optimized** ⚡ |
+| Business Metric | OLTP Execution Time | Star Schema Time | Speedup | Optimization Strategy |
+| :--- | :---: | :---: | :---: | :--- |
+| **Monthly Encounter Trends** | 174ms (Runtime `DATE_FORMAT()`) | 76ms (Pre-computed Date Dimension) | **~2.3x Faster** ⚡ | Pre-computed date attributes eliminate `DATE_FORMAT()` calls |
+| **Revenue by Specialty** | 174ms (4-Table Join Chain) | 10-11ms (Summary Dimension) | **~16x Faster** ⚡ | Pre-aggregated diagnosis-procedure pairs, no runtime joins |
+| **30-Day Readmissions** | 93ms (Complex Self-Join + Date Math) | 15ms (Pre-computed Flag) | **~6x Faster** ⚡ | Pre-computed `is_readmission` flag eliminates O(N²) self-join |
+| **Multi-Diagnosis Analysis** | 95ms (4-Table Join + Billing) | 67ms (Denormalized Fact) | **~1.4x Faster** ⚡ | Billing data denormalized into fact table, simplified query plan |
+
 
 
 ---
