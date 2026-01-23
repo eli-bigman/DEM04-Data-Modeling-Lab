@@ -37,32 +37,28 @@ ORDER BY
 -- -----------------------------------------------------
 -- Question 2: Top Diagnosis-Procedure Pairs
 -- Goal: Most common combinations of diagnosis & procedure
--- Optimization Key: Bridge tables handle M:M relationship efficiently
+-- Optimization Key: Summary dimension with incremental updates
 -- -----------------------------------------------------
 -- Performance Benchmark:
 -- OLTP Time: ~174 ms
--- Star Time: ~177 ms
--- Result: Parity (No Speedup). Bridge tables simplify the structure but do not
--- reduce the computational cost of many-to-many joins without pre-aggregation.
+-- Star Time (Bridge): ~177 ms (baseline using bridge tables)
+-- Star Time (Optimized): 9.96-11.3 ms
+-- Win: ~94% Faster (~16x speedup). Summary dimension eliminates expensive
+-- bridge table joins and pre-aggregates metrics during ETL. This follows the
+-- "compute once, read many" principle - aggregation cost paid during ETL rather
+-- than on every query execution. The dimension updates incrementally with each
+-- ETL batch, ensuring data freshness without full rebuilds.
 -- -----------------------------------------------------
 SELECT 
-    dd.icd10_code,
-    dd.icd10_description,
-    dp.cpt_code,
-    dp.cpt_description,
-    COUNT(DISTINCT fe.encounter_key) AS encounter_count
-FROM fact_encounters fe
-INNER JOIN bridge_encounter_diagnoses bd ON fe.encounter_key = bd.encounter_key
-INNER JOIN dim_diagnosis dd ON bd.diagnosis_key = dd.diagnosis_key
-INNER JOIN bridge_encounter_procedures bp ON fe.encounter_key = bp.encounter_key
-INNER JOIN dim_procedure dp ON bp.procedure_key = dp.procedure_key
-GROUP BY 
-    dd.icd10_code,
-    dd.icd10_description,
-    dp.cpt_code,
-    dp.cpt_description
-ORDER BY 
-    encounter_count DESC
+    icd10_code,
+    icd10_description,
+    cpt_code,
+    cpt_description,
+    encounter_count,
+    total_revenue,
+    ROUND(avg_length_of_stay_days, 1) AS avg_los_days
+FROM dim_diagnosis_procedure_summary
+ORDER BY encounter_count DESC
 LIMIT 10;
 
 
