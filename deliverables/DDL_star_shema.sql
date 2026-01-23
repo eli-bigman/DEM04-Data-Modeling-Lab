@@ -15,6 +15,7 @@
 -- Drop existing tables in dependency order (not done in production)
 DROP TABLE IF EXISTS bridge_encounter_procedures;
 DROP TABLE IF EXISTS bridge_encounter_diagnoses;
+DROP TABLE IF EXISTS dim_diagnosis_procedure_summary;
 DROP TABLE IF EXISTS fact_encounters;
 DROP TABLE IF EXISTS dim_encounter_type;
 DROP TABLE IF EXISTS dim_department;
@@ -376,4 +377,31 @@ CREATE TABLE bridge_encounter_procedures (
     INDEX idx_encounter_key (encounter_key),
     INDEX idx_procedure_key (procedure_key),
     INDEX idx_procedure_date (procedure_date)
+);
+-- =====================================================
+-- SUMMARY DIMENSION: dim_diagnosis_procedure_summary
+-- Purpose: Pre-aggregated diagnosis-procedure combinations
+-- Type: Incrementally maintained summary dimension
+-- Updated: With each ETL batch (Section 3.5)
+-- Query Benefit: Eliminates bridge joins for top diagnosis-procedure queries
+-- =====================================================
+CREATE TABLE dim_diagnosis_procedure_summary (
+    summary_key INT AUTO_INCREMENT PRIMARY KEY,
+    diagnosis_key INT NOT NULL,
+    procedure_key INT NOT NULL,
+    icd10_code VARCHAR(10),
+    icd10_description VARCHAR(255),
+    cpt_code VARCHAR(10),
+    cpt_description VARCHAR(255),
+    encounter_count INT DEFAULT 0,
+    total_revenue DECIMAL(15, 2) DEFAULT 0.00,
+    avg_length_of_stay_days DECIMAL(5, 2) DEFAULT 0.00,
+    last_updated_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    created_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_summary_diagnosis FOREIGN KEY (diagnosis_key) REFERENCES dim_diagnosis(diagnosis_key),
+    CONSTRAINT fk_summary_procedure FOREIGN KEY (procedure_key) REFERENCES dim_procedure(procedure_key),
+    UNIQUE KEY idx_unique_pair (diagnosis_key, procedure_key),
+    INDEX idx_encounter_count (encounter_count DESC),
+    INDEX idx_diagnosis_key (diagnosis_key),
+    INDEX idx_procedure_key (procedure_key)
 );
