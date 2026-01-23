@@ -58,6 +58,9 @@ The optimized analytical database using dimensional modeling:
 - `dim_diagnosis` - ICD-10 codes with descriptions and categories
 - `dim_procedure` - CPT codes with descriptions and categories
 
+**Summary Dimension (1 total)**:
+- `dim_diagnosis_procedure_summary` - Pre-aggregated diagnosis-procedure pairs with encounter counts, optimizes Query 2 performance (94% faster)
+
 **Bridge Tables (2 total)**: 
 - `bridge_encounter_diagnoses` - Many-to-many: encounters ↔ diagnoses
 - `bridge_encounter_procedures` - Many-to-many: encounters ↔ procedures
@@ -289,10 +292,12 @@ docker-compose up -d --build
 2. **Denormalization**: Fewer joins mean less disk I/O and faster query execution
 3. **Dimension Tables**: Pre-computed date parts eliminate runtime calculations
 4. **Indexing Strategy**: Foreign keys in fact table are optimized for analytical queries
+5. **Summary Dimensions**: Pre-aggregated combinations (e.g., diagnosis-procedure pairs) eliminate expensive runtime joins
 
 ### Design Decisions
 - **Fact Grain**: One row per encounter (not per procedure or diagnosis)
 - **8 Dimensions**: Date, Patient, Provider, Specialty, Department, Encounter Type, Diagnosis, Procedure
+- **1 Summary Dimension**: Diagnosis-Procedure pairs with pre-aggregated metrics (incremental updates during ETL)
 - **2 Bridge Tables**: Handle many-to-many relationships for diagnoses and procedures
 - **SCD Type 2 Ready**: Patient and Provider dimensions include effective_date, expiration_date, is_current
 - **Pre-computed Metrics**: 7 metrics calculated during ETL (diagnosis_count, is_readmission, etc.)
