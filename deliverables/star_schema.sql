@@ -15,12 +15,25 @@ SET @last_watermark = (
         WHERE table_name = 'fact_encounters'
             AND last_etl_status = 'SUCCESS'
     );
+-- Get Timestamp Watermark: Last ETL timestamp for SCD Type 2 tracking
+-- This tracks the last time we checked for patient/provider changes
+SET @last_etl_timestamp = (
+        SELECT COALESCE(MAX(last_etl_timestamp), '1900-01-01 00:00:00')
+        FROM etl_metadata
+        WHERE table_name = 'dim_patient'
+            AND last_etl_status = 'SUCCESS'
+    );
 -- Log ETL batch start
 INSERT INTO etl_log (etl_step, status, error_message)
 VALUES (
         'incremental_etl_batch',
         'RUNNING',
-        CONCAT('Watermark: ', @last_watermark)
+        CONCAT(
+            'Encounter Watermark: ',
+            @last_watermark,
+            ' | Timestamp Watermark: ',
+            @last_etl_timestamp
+        )
     );
 SET @batch_log_id = LAST_INSERT_ID();
 -- Step 1: Pre-ETL Data Quality Validation
@@ -36,10 +49,9 @@ SET @dim_log_id = LAST_INSERT_ID();
 -- dim_date: Generated via stored procedure
 -- Strategy: Populate range covering expected data
 -- -----------------------------------------------------
-
-DROP PROCEDURE IF EXISTS populate_dim_date; 
-
+DROP PROCEDURE IF EXISTS populate_dim_date;
 DELIMITER // 
+
 CREATE PROCEDURE populate_dim_date(IN start_date DATE, IN end_date DATE) BEGIN
 DECLARE current_date_val DATE;
 SET current_date_val = start_date;
@@ -83,11 +95,9 @@ SET current_date_val = DATE_ADD(current_date_val, INTERVAL 1 DAY);
 END WHILE;
 -- COMMIT;
 -- SELECT CONCAT('Successfully populated dim_date from ', start_date, ' to ', end_date) AS status;
-END//
-
+END // 
 
 DELIMITER ;
-
 CALL populate_dim_date('2024-01-01', '2026-12-31');
 -- -----------------------------------------------------
 -- dim_specialty: Upsert (SCD Type 1 - Overwrite)
@@ -147,73 +157,21 @@ VALUES(capacity),
 VALUES(department_type);
 -- -----------------------------------------------------
 -- dim_patient: SCD Type 2 (History Tracking)
--- Strategy:
---   1. Detect changed records (name, gender changed)
---   2. Expire old versions (is_current = FALSE)
---   3. Insert new versions (is_current = TRUE)
---   4. Insert brand new patients
+-- Strategy: Timestamp-Based Change Detection
+--   1. Expire changed records (identified by last_update > @last_etl_timestamp)
+--   2. Insert new versions for changed records
+--   3. Insert brand new patients
+-- NO TEMPORARY TABLES USED
 -- -----------------------------------------------------
--- Step 1: Create temp table to identify CHANGED patients
-DROP TEMPORARY TABLE IF EXISTS temp_patient_changes;
-CREATE TEMPORARY TABLE temp_patient_changes AS
-SELECT p.patient_id,
-    p.mrn,
-    p.first_name,
-    p.last_name,
-    p.date_of_birth,
-    p.gender,
-    d.patient_key AS existing_key
-FROM patients p
-    INNER JOIN dim_patient d ON p.patient_id = d.patient_id
-    AND d.is_current = TRUE
-WHERE p.first_name != d.first_name
-    OR p.last_name != d.last_name
-    OR p.gender != d.gender
-    OR p.date_of_birth != d.date_of_birth;
--- Step 2: Expire old records for changed patients
-UPDATE dim_patient
-SET is_current = FALSE,
-    expiration_date = CURDATE()
-WHERE patient_id IN (
-        SELECT patient_id
-        FROM temp_patient_changes
-    )
-    AND is_current = TRUE;
--- Step 3: Insert new versions for changed patients
-INSERT INTO dim_patient (
-        patient_id,
-        mrn,
-        first_name,
-        last_name,
-        full_name,
-        date_of_birth,
-        age,
-        age_group,
-        gender,
-        effective_date,
-        expiration_date,
-        is_current
-    )
-SELECT patient_id,
-    mrn,
-    first_name,
-    last_name,
-    CONCAT(first_name, ' ', last_name) AS full_name,
-    date_of_birth,
-    TIMESTAMPDIFF(YEAR, date_of_birth, CURDATE()) AS age,
-    CASE
-        WHEN TIMESTAMPDIFF(YEAR, date_of_birth, CURDATE()) < 18 THEN '0-17'
-        WHEN TIMESTAMPDIFF(YEAR, date_of_birth, CURDATE()) BETWEEN 18 AND 34 THEN '18-34'
-        WHEN TIMESTAMPDIFF(YEAR, date_of_birth, CURDATE()) BETWEEN 35 AND 54 THEN '35-54'
-        WHEN TIMESTAMPDIFF(YEAR, date_of_birth, CURDATE()) BETWEEN 55 AND 74 THEN '55-74'
-        ELSE '75+'
-    END AS age_group,
-    gender,
-    CURDATE() AS effective_date,
-    '9999-12-31' AS expiration_date,
-    TRUE AS is_current
-FROM temp_patient_changes;
--- Step 4: Insert brand NEW patients (not in dimension at all)
+-- Step 1: Expire changed records (detected via timestamp)
+UPDATE dim_patient d
+    INNER JOIN patients p ON d.patient_id = p.patient_id
+SET d.is_current = FALSE,
+    d.expiration_date = CURDATE()
+WHERE d.is_current = TRUE
+    AND p.last_update > @last_etl_timestamp;
+-- Timestamp-based change detection
+-- Step 2: Insert new versions for changed records
 INSERT INTO dim_patient (
         patient_id,
         mrn,
@@ -247,48 +205,129 @@ SELECT p.patient_id,
     '9999-12-31' AS expiration_date,
     TRUE AS is_current
 FROM patients p
-    LEFT JOIN dim_patient d ON p.patient_id = d.patient_id
-WHERE d.patient_id IS NULL;
-DROP TEMPORARY TABLE IF EXISTS temp_patient_changes;
+    INNER JOIN dim_patient d ON p.patient_id = d.patient_id
+WHERE d.expiration_date = CURDATE() -- Just expired today (from Step 1)
+    AND d.is_current = FALSE;
+-- Step 3: Insert brand NEW patients (not in dimension at all)
+INSERT INTO dim_patient (
+        patient_id,
+        mrn,
+        first_name,
+        last_name,
+        full_name,
+        date_of_birth,
+        age,
+        age_group,
+        gender,
+        effective_date,
+        expiration_date,
+        is_current
+    )
+SELECT p.patient_id,
+    p.mrn,
+    p.first_name,
+    p.last_name,
+    CONCAT(p.first_name, ' ', p.last_name) AS full_name,
+    p.date_of_birth,
+    TIMESTAMPDIFF(YEAR, p.date_of_birth, CURDATE()) AS age,
+    CASE
+        WHEN TIMESTAMPDIFF(YEAR, p.date_of_birth, CURDATE()) < 18 THEN '0-17'
+        WHEN TIMESTAMPDIFF(YEAR, p.date_of_birth, CURDATE()) BETWEEN 18 AND 34 THEN '18-34'
+        WHEN TIMESTAMPDIFF(YEAR, p.date_of_birth, CURDATE()) BETWEEN 35 AND 54 THEN '35-54'
+        WHEN TIMESTAMPDIFF(YEAR, p.date_of_birth, CURDATE()) BETWEEN 55 AND 74 THEN '55-74'
+        ELSE '75+'
+    END AS age_group,
+    p.gender,
+    CURDATE() AS effective_date,
+    '9999-12-31' AS expiration_date,
+    TRUE AS is_current
+FROM patients p
+WHERE NOT EXISTS (
+        SELECT 1
+        FROM dim_patient d
+        WHERE d.patient_id = p.patient_id
+    );
 -- -----------------------------------------------------
 -- dim_provider: SCD Type 2 (History Tracking)
--- Strategy: Same as patient - track specialty/department changes
+-- Strategy: Timestamp-Based Change Detection + Denormalization
+--   1. Expire changed records (identified by last_update > @last_etl_timestamp)
+--   2. Insert new versions with DENORMALIZED specialty/department data
+--   3. Insert brand new providers with denormalized data
+-- NO TEMPORARY TABLES USED
+-- NO FOREIGN KEYS (specialty_id, department_id removed from dim_provider)
 -- -----------------------------------------------------
--- Step 1: Identify CHANGED providers
-DROP TEMPORARY TABLE IF EXISTS temp_provider_changes;
-CREATE TEMPORARY TABLE temp_provider_changes AS
+-- Step 1: Expire changed providers (detected via timestamp)
+UPDATE dim_provider d
+    INNER JOIN providers p ON d.provider_id = p.provider_id
+SET d.is_current = FALSE,
+    d.expiration_date = CURDATE()
+WHERE d.is_current = TRUE
+    AND p.last_update > @last_etl_timestamp;
+-- Timestamp-based change detection
+-- Step 2: Insert new versions for changed providers WITH DENORMALIZED DATA
+INSERT INTO dim_provider (
+        provider_id,
+        first_name,
+        last_name,
+        full_name,
+        credential,
+        specialty_name,
+        specialty_code,
+        specialty_category,
+        department_name,
+        department_floor,
+        department_type,
+        effective_date,
+        expiration_date,
+        is_current
+    )
 SELECT p.provider_id,
     p.first_name,
     p.last_name,
+    CONCAT(p.first_name, ' ', p.last_name) AS full_name,
     p.credential,
-    p.specialty_id,
-    p.department_id,
-    d.provider_key AS existing_key
+    -- Denormalize specialty attributes
+    s.specialty_name,
+    s.specialty_code,
+    CASE
+        WHEN s.specialty_code IN ('SURG', 'ORTH', 'NEUR') THEN 'Surgical'
+        WHEN s.specialty_code IN ('RAD', 'PATH', 'ANES') THEN 'Diagnostic/Support'
+        ELSE 'Medical'
+    END AS specialty_category,
+    -- Denormalize department attributes
+    dept.department_name,
+    dept.floor AS department_floor,
+    CASE
+        WHEN dept.department_name LIKE '%ICU%'
+        OR dept.department_name LIKE '%Inpatient%' THEN 'Inpatient'
+        WHEN dept.department_name LIKE '%Clinic%'
+        OR dept.department_name LIKE '%Outpatient%' THEN 'Outpatient'
+        WHEN dept.department_name LIKE '%Emergency%' THEN 'ER'
+        WHEN dept.department_name LIKE '%Surgical%' THEN 'Surgical'
+        ELSE 'Other'
+    END AS department_type,
+    CURDATE() AS effective_date,
+    '9999-12-31' AS expiration_date,
+    TRUE AS is_current
 FROM providers p
+    LEFT JOIN specialties s ON p.specialty_id = s.specialty_id
+    LEFT JOIN departments dept ON p.department_id = dept.department_id
     INNER JOIN dim_provider d ON p.provider_id = d.provider_id
-    AND d.is_current = TRUE
-WHERE p.first_name != d.first_name
-    OR p.last_name != d.last_name
-    OR p.specialty_id != d.specialty_id
-    OR p.department_id != d.department_id;
--- Step 2: Expire old records
-UPDATE dim_provider
-SET is_current = FALSE,
-    expiration_date = CURDATE()
-WHERE provider_id IN (
-        SELECT provider_id
-        FROM temp_provider_changes
-    )
-    AND is_current = TRUE;
--- Step 3: Insert new versions for changed providers
+WHERE d.expiration_date = CURDATE() -- Just expired today (from Step 1)
+    AND d.is_current = FALSE;
+-- Step 3: Insert brand NEW providers WITH DENORMALIZED DATA
 INSERT INTO dim_provider (
         provider_id,
         first_name,
         last_name,
         full_name,
         credential,
-        specialty_id,
-        department_id,
+        specialty_name,
+        specialty_code,
+        specialty_category,
+        department_name,
+        department_floor,
+        department_type,
         effective_date,
         expiration_date,
         is_current
@@ -298,39 +337,37 @@ SELECT p.provider_id,
     p.last_name,
     CONCAT(p.first_name, ' ', p.last_name) AS full_name,
     p.credential,
-    p.specialty_id,
-    p.department_id,
-    CURDATE() AS effective_date,
-    '9999-12-31' AS expiration_date,
-    TRUE AS is_current
-FROM temp_provider_changes p;
--- Step 4: Insert brand NEW providers
-INSERT INTO dim_provider (
-        provider_id,
-        first_name,
-        last_name,
-        full_name,
-        credential,
-        specialty_id,
-        department_id,
-        effective_date,
-        expiration_date,
-        is_current
-    )
-SELECT p.provider_id,
-    p.first_name,
-    p.last_name,
-    CONCAT(p.first_name, ' ', p.last_name) AS full_name,
-    p.credential,
-    p.specialty_id,
-    p.department_id,
+    -- Denormalize specialty attributes
+    s.specialty_name,
+    s.specialty_code,
+    CASE
+        WHEN s.specialty_code IN ('SURG', 'ORTH', 'NEUR') THEN 'Surgical'
+        WHEN s.specialty_code IN ('RAD', 'PATH', 'ANES') THEN 'Diagnostic/Support'
+        ELSE 'Medical'
+    END AS specialty_category,
+    -- Denormalize department attributes
+    dept.department_name,
+    dept.floor AS department_floor,
+    CASE
+        WHEN dept.department_name LIKE '%ICU%'
+        OR dept.department_name LIKE '%Inpatient%' THEN 'Inpatient'
+        WHEN dept.department_name LIKE '%Clinic%'
+        OR dept.department_name LIKE '%Outpatient%' THEN 'Outpatient'
+        WHEN dept.department_name LIKE '%Emergency%' THEN 'ER'
+        WHEN dept.department_name LIKE '%Surgical%' THEN 'Surgical'
+        ELSE 'Other'
+    END AS department_type,
     CURDATE() AS effective_date,
     '9999-12-31' AS expiration_date,
     TRUE AS is_current
 FROM providers p
-    LEFT JOIN dim_provider d ON p.provider_id = d.provider_id
-WHERE d.provider_id IS NULL;
-DROP TEMPORARY TABLE IF EXISTS temp_provider_changes;
+    LEFT JOIN specialties s ON p.specialty_id = s.specialty_id
+    LEFT JOIN departments dept ON p.department_id = dept.department_id
+WHERE NOT EXISTS (
+        SELECT 1
+        FROM dim_provider d
+        WHERE d.provider_id = p.provider_id
+    );
 -- -----------------------------------------------------
 -- dim_encounter_type: Upsert (Static dimension)
 -- -----------------------------------------------------
@@ -454,13 +491,13 @@ SELECT dd.date_key,
 FROM encounters e -- ===========================================================
     -- INCREMENTAL FILTER: Only load NEW encounters based on DATE
     -- ===========================================================
-    LEFT JOIN fact_encounters existing ON e.encounter_id = existing.encounter_id -- ===========================================================
+    LEFT JOIN fact_encounters existing ON e.encounter_id = existing.encounter_id
     INNER JOIN dim_date dd ON DATE(e.encounter_date) = dd.calendar_date
     INNER JOIN dim_patient dp ON e.patient_id = dp.patient_id
     AND dp.is_current = TRUE
     INNER JOIN dim_provider dpr ON e.provider_id = dpr.provider_id
     AND dpr.is_current = TRUE
-    INNER JOIN dim_specialty ds ON dpr.specialty_id = ds.specialty_id
+    INNER JOIN dim_specialty ds ON dpr.specialty_code = ds.specialty_code
     INNER JOIN dim_department ddept ON e.department_id = ddept.department_id
     INNER JOIN dim_encounter_type det ON e.encounter_type = det.encounter_type
     LEFT JOIN billing b ON e.encounter_id = b.encounter_id
@@ -493,41 +530,38 @@ SET @new_watermark_value = (
 SET @final_watermark = COALESCE(@new_watermark_value, @last_watermark);
 -- Compute is_readmission flag for ALL encounters (including newly loaded)
 -- A new encounter might trigger readmission for a previous one
+-- NO TEMPORARY TABLES - Direct timestamp-based query
 SET SQL_SAFE_UPDATES = 0;
--- Create temp table for affected patients
-CREATE TEMPORARY TABLE temp_affected_patients AS
-SELECT DISTINCT patient_id
-FROM fact_encounters
-WHERE created_date >= @etl_start_time;
--- Add index for faster JOIN
-ALTER TABLE temp_affected_patients
-ADD INDEX idx_patient_id (patient_id);
--- Reset readmission flags for patients affected by new loads (Using JOIN instead of IN subquery)
-UPDATE fact_encounters fe
-    INNER JOIN temp_affected_patients tap ON fe.patient_id = tap.patient_id
-SET fe.is_readmission = FALSE;
--- Create temp table for readmissions
-CREATE TEMPORARY TABLE temp_readmissions AS
-SELECT DISTINCT f1.encounter_key
-FROM fact_encounters f1
+-- Reset readmission flags for patients with NEW encounters in this ETL batch
+-- Use derived table wrapper to avoid MySQL error 1093
+UPDATE fact_encounters
+SET is_readmission = FALSE
+WHERE patient_id IN (
+        SELECT patient_id
+        FROM (
+                SELECT DISTINCT patient_id
+                FROM fact_encounters
+                WHERE created_date >= @etl_start_time
+            ) AS affected_patients
+    );
+-- Directly compute and set readmission flag (no temp tables)
+UPDATE fact_encounters f1
     INNER JOIN fact_encounters f2 ON f1.patient_id = f2.patient_id
     AND f1.encounter_datetime > f2.discharge_datetime
     AND DATEDIFF(f1.encounter_datetime, f2.discharge_datetime) <= 30
     INNER JOIN dim_encounter_type det1 ON f1.encounter_type_key = det1.encounter_type_key
     INNER JOIN dim_encounter_type det2 ON f2.encounter_type_key = det2.encounter_type_key
+SET f1.is_readmission = TRUE
 WHERE det1.encounter_type = 'Inpatient'
     AND det2.encounter_type = 'Inpatient'
     AND f1.patient_id IN (
         SELECT patient_id
-        FROM temp_affected_patients
+        FROM (
+                SELECT DISTINCT patient_id
+                FROM fact_encounters
+                WHERE created_date >= @etl_start_time
+            ) AS affected_patients2
     );
--- Recompute readmissions for affected patients
-UPDATE fact_encounters fe
-    INNER JOIN temp_readmissions tr ON fe.encounter_key = tr.encounter_key
-SET fe.is_readmission = TRUE;
--- Drop temp tables
-DROP TEMPORARY TABLE temp_readmissions;
-DROP TEMPORARY TABLE temp_affected_patients;
 SET SQL_SAFE_UPDATES = 1;
 COMMIT;
 -- Update fact ETL log
@@ -679,7 +713,7 @@ WHERE log_id = @summary_log_id;
 -- =====================================================
 -- Run reconciliation checks
 CALL reconcile_etl_data();
--- Update ETL Metadata with NEW High Watermark (Encounter Date)
+-- Update ETL Metadata with NEW High Watermark (Encounter Date) AND Timestamp Watermark
 INSERT INTO etl_metadata (
         table_name,
         last_etl_timestamp,
@@ -697,7 +731,8 @@ VALUES (
     (
         'dim_patient',
         NOW(),
-        '1900-01-01',
+        NOW(),
+        -- Store current timestamp as watermark for SCD Type 2
         'SUCCESS',
         (
             SELECT COUNT(*)
@@ -708,7 +743,8 @@ VALUES (
     (
         'dim_provider',
         NOW(),
-        '1900-01-01',
+        NOW(),
+        -- Store current timestamp as watermark for SCD Type 2
         'SUCCESS',
         (
             SELECT COUNT(*)
