@@ -3,14 +3,11 @@
 -- Purpose: Expand sample data to 10,000 records per table
 -- Database: MySQL
 -- ================================================================
-
 -- ================================================================
 -- Healthcare Analytics Lab: OLTP Database Setup
 -- ================================================================
-
 CREATE DATABASE IF NOT EXISTS healthcare_analytics_lab;
 USE healthcare_analytics_lab;
-
 -- Drop tables in reverse dependency order (!not done in production!)
 DROP TABLE IF EXISTS encounter_procedures;
 DROP TABLE IF EXISTS encounter_diagnoses;
@@ -22,105 +19,101 @@ DROP TABLE IF EXISTS providers;
 DROP TABLE IF EXISTS departments;
 DROP TABLE IF EXISTS specialties;
 DROP TABLE IF EXISTS patients;
-
 -- Create base tables
 CREATE TABLE patients (
-  patient_id INT PRIMARY KEY,
-  first_name VARCHAR(100),
-  last_name VARCHAR(100),
-  date_of_birth DATE,
-  gender CHAR(1),
-  mrn VARCHAR(20) UNIQUE
+    patient_id INT PRIMARY KEY,
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
+    date_of_birth DATE,
+    gender CHAR(1),
+    mrn VARCHAR(20) UNIQUE
 );
-
 CREATE TABLE specialties (
-  specialty_id INT PRIMARY KEY,
-  specialty_name VARCHAR(100),
-  specialty_code VARCHAR(10)
+    specialty_id INT PRIMARY KEY,
+    specialty_name VARCHAR(100),
+    specialty_code VARCHAR(10)
 );
-
 CREATE TABLE departments (
-  department_id INT PRIMARY KEY,
-  department_name VARCHAR(100),
-  floor INT,
-  capacity INT
+    department_id INT PRIMARY KEY,
+    department_name VARCHAR(100),
+    floor INT,
+    capacity INT
 );
-
 CREATE TABLE diagnoses (
-  diagnosis_id INT PRIMARY KEY,
-  icd10_code VARCHAR(10),
-  icd10_description VARCHAR(200)
+    diagnosis_id INT PRIMARY KEY,
+    icd10_code VARCHAR(10),
+    icd10_description VARCHAR(200)
 );
-
 CREATE TABLE procedures (
-  procedure_id INT PRIMARY KEY,
-  cpt_code VARCHAR(10),
-  cpt_description VARCHAR(200)
+    procedure_id INT PRIMARY KEY,
+    cpt_code VARCHAR(10),
+    cpt_description VARCHAR(200)
 );
-
 CREATE TABLE providers (
-  provider_id INT PRIMARY KEY,
-  first_name VARCHAR(100),
-  last_name VARCHAR(100),
-  credential VARCHAR(20),
-  specialty_id INT,
-  department_id INT,
-  FOREIGN KEY (specialty_id) REFERENCES specialties(specialty_id),
-  FOREIGN KEY (department_id) REFERENCES departments(department_id)
+    provider_id INT PRIMARY KEY,
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
+    credential VARCHAR(20),
+    specialty_id INT,
+    department_id INT,
+    FOREIGN KEY (specialty_id) REFERENCES specialties(specialty_id),
+    FOREIGN KEY (department_id) REFERENCES departments(department_id)
 );
-
 CREATE TABLE encounters (
-  encounter_id INT PRIMARY KEY,
-  patient_id INT,
-  provider_id INT,
-  encounter_type VARCHAR(50),
-  encounter_date DATETIME,
-  discharge_date DATETIME,
-  department_id INT,
-  FOREIGN KEY (patient_id) REFERENCES patients(patient_id),
-  FOREIGN KEY (provider_id) REFERENCES providers(provider_id),
-  FOREIGN KEY (department_id) REFERENCES departments(department_id),
-  INDEX idx_encounter_date (encounter_date)
+    encounter_id INT PRIMARY KEY,
+    patient_id INT,
+    provider_id INT,
+    encounter_type VARCHAR(50),
+    encounter_date DATETIME,
+    discharge_date DATETIME,
+    department_id INT,
+    FOREIGN KEY (patient_id) REFERENCES patients(patient_id),
+    FOREIGN KEY (provider_id) REFERENCES providers(provider_id),
+    FOREIGN KEY (department_id) REFERENCES departments(department_id),
+    INDEX idx_encounter_date (encounter_date)
 );
-
 CREATE TABLE encounter_diagnoses (
-  encounter_diagnosis_id INT PRIMARY KEY,
-  encounter_id INT,
-  diagnosis_id INT,
-  diagnosis_sequence INT,
-  FOREIGN KEY (encounter_id) REFERENCES encounters(encounter_id),
-  FOREIGN KEY (diagnosis_id) REFERENCES diagnoses(diagnosis_id)
+    encounter_diagnosis_id INT PRIMARY KEY,
+    encounter_id INT,
+    diagnosis_id INT,
+    diagnosis_sequence INT,
+    FOREIGN KEY (encounter_id) REFERENCES encounters(encounter_id),
+    FOREIGN KEY (diagnosis_id) REFERENCES diagnoses(diagnosis_id)
 );
-
 CREATE TABLE encounter_procedures (
-  encounter_procedure_id INT PRIMARY KEY,
-  encounter_id INT,
-  procedure_id INT,
-  procedure_date DATE,
-  FOREIGN KEY (encounter_id) REFERENCES encounters(encounter_id),
-  FOREIGN KEY (procedure_id) REFERENCES procedures(procedure_id)
+    encounter_procedure_id INT PRIMARY KEY,
+    encounter_id INT,
+    procedure_id INT,
+    procedure_date DATE,
+    FOREIGN KEY (encounter_id) REFERENCES encounters(encounter_id),
+    FOREIGN KEY (procedure_id) REFERENCES procedures(procedure_id)
 );
-
 CREATE TABLE billing (
-  billing_id INT PRIMARY KEY,
-  encounter_id INT,
-  claim_amount DECIMAL(12, 2),
-  allowed_amount DECIMAL(12, 2),
-  claim_date DATE,
-  claim_status VARCHAR(50),
-  FOREIGN KEY (encounter_id) REFERENCES encounters(encounter_id),
-  INDEX idx_claim_date (claim_date)
+    billing_id INT PRIMARY KEY,
+    encounter_id INT,
+    claim_amount DECIMAL(12, 2),
+    allowed_amount DECIMAL(12, 2),
+    claim_date DATE,
+    claim_status VARCHAR(50),
+    FOREIGN KEY (encounter_id) REFERENCES encounters(encounter_id),
+    INDEX idx_claim_date (claim_date)
 );
-
+-- ================================================================
+-- ADD TIMESTAMP-BASED CHANGE DATA CAPTURE (CDC) COLUMNS
+-- Purpose: Track changes to source tables for incremental ETL
+-- ================================================================
+-- Add last_update column to patients table
+ALTER TABLE patients
+ADD COLUMN last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
+-- Add last_update column to providers table
+ALTER TABLE providers
+ADD COLUMN last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
 -- ================================================================
 -- DATA POPULATION STARTS BELOW
 -- ================================================================
-
-
 -- increase max recursion depth
 SET SESSION cte_max_recursion_depth = 10001;
 -- Generate 10,000 Specialties
-
 -- Clear old data to avoid ID conflicts
 INSERT INTO specialties (specialty_id, specialty_name, specialty_code) WITH RECURSIVE numbers AS (
         SELECT 1 AS n
@@ -178,7 +171,6 @@ SELECT n,
     END
 FROM numbers;
 -- Generate 15 Departments
-
 INSERT INTO departments (department_id, department_name, floor, capacity) WITH RECURSIVE numbers AS (
         SELECT 1 AS n
         UNION ALL
@@ -550,43 +542,37 @@ INSERT INTO encounters (
         encounter_date,
         discharge_date,
         department_id
-    ) 
-WITH RECURSIVE numbers AS (
-    SELECT 1 AS n
-    UNION ALL
-    SELECT n + 1
-    FROM numbers
-    WHERE n < 10000
-),
-base_encounters AS (
-    SELECT 
-        n,
-        CASE
-            WHEN n % 3 = 1 THEN 'Outpatient'
-            WHEN n % 3 = 2 THEN 'Inpatient'
-            ELSE 'ER'
-        END AS encounter_type,
-        -- Deterministic encounter_date based on n
-        DATE_ADD(
-            DATE_ADD('2024-01-01', INTERVAL (n % 365) DAY),
-            INTERVAL (n % 24) HOUR
-        ) AS encounter_date
-    FROM numbers
-)
-SELECT 
-    n AS encounter_id,
+    ) WITH RECURSIVE numbers AS (
+        SELECT 1 AS n
+        UNION ALL
+        SELECT n + 1
+        FROM numbers
+        WHERE n < 10000
+    ),
+    base_encounters AS (
+        SELECT n,
+            CASE
+                WHEN n % 3 = 1 THEN 'Outpatient'
+                WHEN n % 3 = 2 THEN 'Inpatient'
+                ELSE 'ER'
+            END AS encounter_type,
+            -- Deterministic encounter_date based on n
+            DATE_ADD(
+                DATE_ADD('2024-01-01', INTERVAL (n % 365) DAY),
+                INTERVAL (n % 24) HOUR
+            ) AS encounter_date
+        FROM numbers
+    )
+SELECT n AS encounter_id,
     ((n - 1) % 10000) + 1 AS patient_id,
     ((n - 1) % 1000) + 1 AS provider_id,
     encounter_type,
     encounter_date,
     -- Discharge is ALWAYS after encounter_date (adds 1+ hours/days)
     CASE
-        WHEN encounter_type = 'Outpatient' THEN 
-            DATE_ADD(encounter_date, INTERVAL ((n % 4) + 1) HOUR)
-        WHEN encounter_type = 'Inpatient' THEN 
-            DATE_ADD(encounter_date, INTERVAL ((n % 10) + 1) DAY)
-        ELSE 
-            DATE_ADD(encounter_date, INTERVAL ((n % 12) + 1) HOUR)
+        WHEN encounter_type = 'Outpatient' THEN DATE_ADD(encounter_date, INTERVAL ((n % 4) + 1) HOUR)
+        WHEN encounter_type = 'Inpatient' THEN DATE_ADD(encounter_date, INTERVAL ((n % 10) + 1) DAY)
+        ELSE DATE_ADD(encounter_date, INTERVAL ((n % 12) + 1) HOUR)
     END AS discharge_date,
     ((n - 1) % 15) + 1 AS department_id
 FROM base_encounters;
@@ -658,7 +644,7 @@ FROM numbers;
 -- Each table now has 10,000 records
 -- ================================================================
 
--- ================================================================
+
 -- Inject deterministic inpatient readmissions (200) and matching rows
 -- Purpose: create reproducible Inpatient -> Inpatient readmission pairs
 -- New encounter ids begin at 10001 to avoid PK collisions with the
@@ -668,12 +654,15 @@ FROM numbers;
 -- downstream inserts reference the same originals (prevents FK mismatches).
 DROP TEMPORARY TABLE IF EXISTS temp_readmission_sources;
 CREATE TEMPORARY TABLE temp_readmission_sources AS
-SELECT encounter_id, patient_id, provider_id, discharge_date, department_id
+SELECT encounter_id,
+    patient_id,
+    provider_id,
+    discharge_date,
+    department_id
 FROM encounters
 WHERE encounter_type = 'Inpatient'
 ORDER BY encounter_id
 LIMIT 200;
-
 -- Insert new readmission encounters (IDs offset by 10000 using the source id)
 INSERT INTO encounters (
         encounter_id,
@@ -684,16 +673,23 @@ INSERT INTO encounters (
         discharge_date,
         department_id
     )
-SELECT
-    10000 + trs.encounter_id AS encounter_id,
+SELECT 10000 + trs.encounter_id AS encounter_id,
     trs.patient_id,
     ((trs.provider_id % 1000) + 1) AS provider_id,
     'Inpatient' AS encounter_type,
-    DATE_ADD(trs.discharge_date, INTERVAL ((trs.encounter_id % 30) + 1) DAY) AS encounter_date,
-    DATE_ADD(DATE_ADD(trs.discharge_date, INTERVAL ((trs.encounter_id % 30) + 1) DAY), INTERVAL ((trs.encounter_id % 10) + 1) DAY) AS discharge_date,
+    DATE_ADD(
+        trs.discharge_date,
+        INTERVAL ((trs.encounter_id % 30) + 1) DAY
+    ) AS encounter_date,
+    DATE_ADD(
+        DATE_ADD(
+            trs.discharge_date,
+            INTERVAL ((trs.encounter_id % 30) + 1) DAY
+        ),
+        INTERVAL ((trs.encounter_id % 10) + 1) DAY
+    ) AS discharge_date,
     trs.department_id
 FROM temp_readmission_sources trs;
-
 -- Add matching billing rows only for those source encounters (preserves FK)
 INSERT INTO billing (
         billing_id,
@@ -703,12 +699,14 @@ INSERT INTO billing (
         claim_date,
         claim_status
     )
-SELECT
-    10000 + b.billing_id AS billing_id,
+SELECT 10000 + b.billing_id AS billing_id,
     10000 + b.encounter_id AS encounter_id,
     ROUND(500 + (RAND() * 50000), 2) AS claim_amount,
     ROUND((500 + (RAND() * 50000)) * 0.8, 2) AS allowed_amount,
-    DATE_ADD('2024-01-01', INTERVAL (b.encounter_id % 365) DAY) AS claim_date,
+    DATE_ADD(
+        '2024-01-01',
+        INTERVAL (b.encounter_id % 365) DAY
+    ) AS claim_date,
     CASE
         WHEN b.billing_id % 10 = 1 THEN 'Pending'
         WHEN b.billing_id % 10 = 2 THEN 'Denied'
@@ -716,8 +714,7 @@ SELECT
         ELSE 'Paid'
     END AS claim_status
 FROM billing b
-JOIN temp_readmission_sources trs ON b.encounter_id = trs.encounter_id;
-
+    JOIN temp_readmission_sources trs ON b.encounter_id = trs.encounter_id;
 -- Add matching encounter_diagnoses for the new encounters (ids offset by 10000)
 INSERT INTO encounter_diagnoses (
         encounter_diagnosis_id,
@@ -725,14 +722,12 @@ INSERT INTO encounter_diagnoses (
         diagnosis_id,
         diagnosis_sequence
     )
-SELECT
-    10000 + ed.encounter_diagnosis_id,
+SELECT 10000 + ed.encounter_diagnosis_id,
     10000 + ed.encounter_id,
     ed.diagnosis_id,
     ed.diagnosis_sequence
 FROM encounter_diagnoses ed
-JOIN temp_readmission_sources trs ON ed.encounter_id = trs.encounter_id;
-
+    JOIN temp_readmission_sources trs ON ed.encounter_id = trs.encounter_id;
 -- Add matching encounter_procedures for the new encounters (ids offset by 10000)
 INSERT INTO encounter_procedures (
         encounter_procedure_id,
@@ -740,14 +735,14 @@ INSERT INTO encounter_procedures (
         procedure_id,
         procedure_date
     )
-SELECT
-    10000 + ep.encounter_procedure_id,
+SELECT 10000 + ep.encounter_procedure_id,
     10000 + ep.encounter_id,
     ep.procedure_id,
-    DATE_ADD(ep.procedure_date, INTERVAL ((ep.encounter_procedure_id % 7) + 1) DAY)
+    DATE_ADD(
+        ep.procedure_date,
+        INTERVAL ((ep.encounter_procedure_id % 7) + 1) DAY
+    )
 FROM encounter_procedures ep
-JOIN temp_readmission_sources trs ON ep.encounter_id = trs.encounter_id;
-
+    JOIN temp_readmission_sources trs ON ep.encounter_id = trs.encounter_id;
 -- Clean up
 DROP TEMPORARY TABLE IF EXISTS temp_readmission_sources;
-
